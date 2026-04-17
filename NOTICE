@@ -1,0 +1,123 @@
+morozov-claude-plugin
+Copyright (c) 2026 Alexander Morozov
+
+This repository contains both original work and bundled third-party components.
+Each is governed by its own license.
+
+================================================================================
+  1. ORIGINAL WORK  — licensed under CC BY-NC-SA 4.0 (see LICENSE)
+================================================================================
+
+The following are original to this repository and are licensed under the
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License
+(CC BY-NC-SA 4.0):
+
+  - README.md, NOTICE, ai.txt
+  - .claude-plugin/plugin.json, .claude-plugin/marketplace.json
+  - skills/formal-modeling/SKILL.md
+  - skills/formal-modeling/references/*.als
+  - skills/formal-modeling/references/*.dfy
+  - skills/formal-modeling/references/*.reference
+  - skills/formal-modeling/self-models/*.als
+  - skills/formal-modeling/self-models/*.dfy
+  - skills/formal-modeling/scripts/alloy_run.sh
+  - skills/formal-modeling/scripts/alloy_format.py
+  - skills/formal-modeling/scripts/dafny_run.sh
+  - skills/formal-modeling/scripts/dafny_format.py
+  - skills/formal-modeling/scripts/verify.sh
+  - skills/formal-modeling/scripts/eval_*.sh
+  - skills/formal-debugger/SKILL.md
+  - skills/formal-debugger/tooling-inventory.md
+
+Full license text: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+================================================================================
+  2. THIRD-PARTY COMPONENTS  — Alloy 6 fetched at runtime, pinned to MiniSat
+================================================================================
+
+This repository does NOT redistribute any third-party binaries. The
+Alloy 6 distribution is downloaded at runtime by
+`skills/formal-modeling/scripts/alloy_run.sh` from the official
+AlloyTools release on GitHub:
+
+  https://github.com/AlloyTools/org.alloytools.alloy
+
+The downloaded jar is extracted into a local, gitignored cache at
+`skills/formal-modeling/scripts/.alloy/extracted/`. Those files are
+governed by the licenses of their respective authors (see
+THIRD_PARTY_LICENSES.md for the component-by-component breakdown);
+the upstream `.txt` license files travel with the distribution inside
+the `extracted/` directory and its `LICENSES/` subdirectory.
+
+Pinned solver: the skill's `AlloyRunner` always uses MiniSat with
+unsat-core support (kodkod solver id `minisat.prover`, MIT license),
+with SAT4J (LGPL 2.1) as automatic fallback if the MiniSat native
+library is unavailable on the current platform. The downloaded
+distribution also contains Lingeling and ZChaff, but the skill
+deliberately never invokes them.
+
+Post-extraction strip: immediately after extracting the downloaded jar,
+`alloy_run.sh` runs a `strip_nc_solvers` function that deletes the
+Lingeling native binaries (`native/*/*/plingeling{,.exe}`, and the
+`org/alloytools/solvers/natv/lingeling/` JNI wrapper package) from the
+local cache. (ZChaff is not actually shipped as an executable solver
+in Alloy 6.2+, only its historical license text remains.) After the
+strip, the noncommercial solvers are not merely "never invoked" but
+"physically absent" from the workspace.
+
+Two separate reasons for the runtime-download + pinning pattern:
+
+  1. ZChaff (Princeton) requires "prior consent of Princeton
+     University" for any distribution. By fetching at runtime, each
+     user invokes AlloyTools' own distribution channel directly —
+     this repository never acts as a redistributor of ZChaff.
+  2. Lingeling (Armin Biere) grants permission only for "evaluation
+     and research purposes"; "all other usage is reserved." Same
+     argument: not redistributed here, and never invoked by the
+     skill regardless.
+
+Alignment with this repository's CC BY-NC-SA 4.0 license:
+
+  - The skill is licensed NonCommercial. Downstream users must
+    therefore be noncommercial, which aligns with the noncommercial
+    restrictions on ZChaff and Lingeling if the user later chooses to
+    enable them manually.
+  - No obligation to redistribute flows from an LGPL 2.1 (SAT4J) or
+    MPL 2.0 (Electrod) component to this repository, because this
+    repository does not redistribute them — it merely instructs
+    `alloy_run.sh` to download them.
+
+Key constraints the user inherits when alloy_run.sh downloads the jar:
+
+  - Alloy, Kodkod, MiniSat, JavaCup, Gini  — MIT.
+  - SAT4J                                   — LGPL 2.1 (weak copyleft).
+  - Electrod                                — MPL 2.0 (file-level
+                                              copyleft).
+  - Glucose / Syrup                         — MIT-base + no use in SAT
+                                              competitions without the
+                                              authors' permission.
+  - ZChaff (Princeton)                      — noncommercial research
+                                              use only; redistribution
+                                              requires Princeton's
+                                              consent (never invoked
+                                              by this skill).
+  - Lingeling (Biere)                       — "evaluation and research
+                                              purposes" only; "all
+                                              other usage is reserved"
+                                              (never invoked by this
+                                              skill).
+
+================================================================================
+  3. INVOKED (NOT BUNDLED) TOOLS
+================================================================================
+
+These tools are invoked by the scripts but are not redistributed by this
+repository. Users install them themselves:
+
+  - OpenJDK / Java 17+   GPL 2.0 with Classpath Exception
+  - Python 3             Python Software Foundation License
+  - Dafny (optional)     MIT License
+  - Docker (optional)    Apache License 2.0 (client)
+
+No obligations from these licenses flow to this repository because they are
+neither redistributed nor statically linked into any artifact here.

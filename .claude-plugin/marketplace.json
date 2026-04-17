@@ -1,0 +1,22 @@
+{
+  "name": "morozov-claude-plugin",
+  "owner": {
+    "name": "Alexander Morozov",
+    "email": "morozov.18.09@gmail.com"
+  },
+  "metadata": {
+    "description": "Formal methods skills for modeling and debugging software systems using Alloy 6 and Dafny",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "formal-methods",
+      "description": "Formal modeling and hypothesis-driven debugging using Alloy 6 and Dafny formal verification",
+      "source": "./",
+      "skills": [
+        "./skills/formal-modeling",
+        "./skills/formal-debugger"
+      ]
+    }
+  ]
+}

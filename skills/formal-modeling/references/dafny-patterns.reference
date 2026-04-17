@@ -1,0 +1,1037 @@
+# Dafny Modeling Patterns
+
+Production-proven patterns for writing Dafny verification models. Read this when writing a new model
+or porting from Alloy.
+
+## Table of Contents
+
+**Basics**
+1. [Enum via Datatype](#1-enum-via-datatype)
+2. [Type Aliases](#2-type-aliases)
+3. [Record Datatypes](#3-record-datatypes)
+4. [Disjoint Union (Tagged Variant)](#4-disjoint-union)
+5. [Helper Predicates (Classification Groups)](#5-helper-predicates)
+6. [Pure Functions with Postconditions](#6-pure-functions-with-postconditions)
+
+**Structural Patterns**
+7. [Total Ordering via Index Function](#7-total-ordering-via-index-function)
+8. [Relation as Predicate with Pattern Matching](#8-relation-as-predicate)
+9. [Production Rule Dictionary](#9-production-rule-dictionary)
+10. [System State as Aggregate](#10-system-state-as-aggregate)
+11. [Existence Query via Sequence Search](#11-existence-query-via-sequence-search)
+12. [Uniqueness Constraint (Double Quantifier)](#12-uniqueness-constraint)
+13. [Referential Integrity](#13-referential-integrity)
+14. [Composite Invariant Predicate](#14-composite-invariant-predicate)
+
+**State Machine Patterns**
+15. [Transition Matrix via Match](#15-transition-matrix)
+16. [State with History](#16-state-with-history)
+17. [Executable Transition Methods](#17-executable-transition-methods)
+18. [Chained State Progression](#18-chained-state-progression)
+19. [Branching Flows](#19-branching-flows)
+20. [Stutter Step](#20-stutter-step)
+
+**Temporal / Trace Patterns**
+21. [Trace as Sequence of States](#21-trace-as-sequence)
+22. [Always / Eventually via Quantifiers](#22-always-eventually)
+23. [Inductive Proof over Trace Indices](#23-inductive-trace-proof)
+24. [Sink State Verification](#24-sink-state-verification)
+25. [Witness Trace Construction](#25-witness-trace-construction)
+26. [Trace Safety (Blocked Transitions)](#26-trace-safety)
+
+**Access Control Patterns**
+27. [Role x State x Field Access Matrix](#27-access-matrix)
+28. [Role-Gated Transitions](#28-role-gated-transitions)
+29. [CTA Availability](#29-cta-availability)
+30. [Notification Template Design](#30-notification-template-design)
+
+**Data Conversion & Domain Patterns**
+31. [Axiomatic Function (Spec, Not Impl)](#31-axiomatic-function)
+32. [Type-Dispatched Behavior](#32-type-dispatched-behavior)
+33. [Wire Format Encoding/Decoding](#33-wire-format)
+34. [Effect Bag / Metric Aggregation](#34-effect-bag)
+35. [Sliding Window with Offset](#35-sliding-window)
+
+**Pipeline & Dependency Patterns**
+36. [Pipeline DAG with Dependencies](#36-pipeline-dag)
+37. [Artifact Versioning & Staleness](#37-artifact-versioning)
+38. [Proof of Work (Evidence Tracking)](#38-proof-of-work)
+39. [Resolved Choice (OR-Dependency)](#39-resolved-choice)
+
+**Proof Technique Patterns**
+40. [Empty-Body Lemma (Exhaustive Match)](#40-empty-body-lemma)
+41. [Witness Construction for Existentials](#41-witness-construction)
+42. [Contrapositive Restatement](#42-contrapositive-restatement)
+43. [Assert Hint for SMT Guidance](#43-assert-hint)
+44. [Exhaustive Forall Dispatch](#44-exhaustive-forall-dispatch)
+45. [Gap Assertion (Expected Failure)](#45-gap-assertion)
+46. [Equivalence Classes (Range Partitioning)](#46-equivalence-classes)
+
+---
+
+## 1. Enum via Datatype
+
+Dafny models enumerations as datatypes with nullary constructors:
+
+```dafny
+datatype OrderStatus = Created | PaymentPending | Paid | Shipped | Delivered | Cancelled | Refunded
+
+datatype Role = Admin | Manager | Owner | Viewer | Author | Contact
+```
+
+Each constructor is a distinct value. Pattern matching is exhaustive — the compiler forces you
+to handle every case. No integer mapping or abstract sig needed.
+
+## 2. Type Aliases
+
+Give semantic meaning to primitive types without wrapping overhead:
+
+```dafny
+type UserId = nat
+type PlanId = nat
+type PlatformAId = nat
+type Day = int
+type TzOffset = int
+```
+
+Prevents accidental mixing of ID types in function signatures. Lightweight — no runtime cost.
+
+## 3. Record Datatypes
+
+Model entities as immutable records with named fields:
+
+```dafny
+datatype User = User(id: UserId, deleted: bool)
+datatype Plan = Plan(id: PlanId, published: bool)
+datatype Subscription = Subscription(
+  owner: UserId,
+  plan: PlanId,
+  status: SubStatus,
+  obsolete: bool,
+  platform: Platform
+)
+```
+
+Fields are accessed with dot notation: `sub.owner`, `sub.status`. Datatypes are immutable —
+create a new value to represent a state change.
+
+## 4. Disjoint Union
+
+Model an entity that belongs to exactly one of several categories using a tagged variant:
+
+```dafny
+datatype Platform = PlatformA(aId: PlatformAId) | PlatformB(bId: PlatformBId)
+```
+
+Must discriminate before accessing variant-specific fields:
+
+```dafny
+predicate isPlatformA(p: Platform) { p.PlatformA? }
+
+function platformAId(p: Platform): PlatformAId
+  requires p.PlatformA?
+{ p.aId }
+```
+
+The `p.PlatformA?` test returns true if `p` was constructed with the `PlatformA` constructor.
+Replaces Alloy's `extends` subtype pattern.
+
+## 5. Helper Predicates
+
+Partition the domain into named groups for reuse across access rules and invariants:
+
+```dafny
+predicate terminal(s: TaskState) { s == Done || s == Cancelled }
+predicate editable(s: TaskState) { s == Draft || s == Review || s == Paused }
+
+predicate isRequired(f: Field) { f == Title || f == Description || f == Priority || f == Deadline }
+predicate isInternalOnly(f: Field) { f == CostBreakdown || f == InternalNotes || f == BillingRef }
+predicate isActiveAllowed(f: Field) { f == Priority || f == Deadline || f == Attachments }
+```
+
+These predicates are pure, composable, and reusable. They replace Alloy's `fun` returning sets
+(e.g., `fun internalOnly: set Field`).
+
+## 6. Pure Functions with Postconditions
+
+Specify function behavior via `ensures` without implementing full logic:
+
+```dafny
+function dayShift(offset: TzOffset): int
+  requires validOffset(offset)
+  ensures -1 <= dayShift(offset) <= 1
+{
+  if offset >= 12 then 1
+  else if offset <= -12 then -1
+  else 0
+}
+```
+
+The `ensures` clause is the contract — lemmas can reason about it without knowing the body.
+Replaces Alloy's `fun` with added verification power.
+
+## 7. Total Ordering via Index Function
+
+Dafny has no built-in `util/ordering`. Encode total order as a function mapping to `nat`:
+
+```dafny
+function stepIndex(s: Step): nat {
+  match s {
+    case S1_Trigger     => 0
+    case S2_LoadContext  => 1
+    case S3_Clarify     => 2
+    case S4_SelectStyle => 3
+    case S5_WriteModel  => 4
+    // ...
+  }
+}
+
+predicate stepBefore(a: Step, b: Step) { stepIndex(a) < stepIndex(b) }
+predicate stepAtOrBefore(a: Step, b: Step) { stepIndex(a) <= stepIndex(b) }
+```
+
+This gives `<`, `<=`, `first`, `last` for free via integer comparison. The index function
+is total (every variant has a mapping) so the ordering is complete.
+
+## 8. Relation as Predicate
+
+Encode Alloy's binary/ternary relations as predicates with exhaustive pattern matching:
+
+```dafny
+predicate ValidTransition(from: OrderStatus, to: OrderStatus) {
+  (from == Created && to == PaymentPending) ||
+  (from == PaymentPending && to == Paid) ||
+  (from == Paid && to == Shipped) ||
+  (from == Shipped && to == Delivered) ||
+  (from == Created && to == Cancelled) ||
+  (from == PaymentPending && to == Cancelled) ||
+  (from == Paid && to == Cancelled) ||
+  (from == Paid && to == Refunded)
+}
+```
+
+The explicit enumeration of all valid pairs lets Dafny prove properties by exhaustive evaluation.
+Replaces Alloy's `pred` with `sig` atoms and relational constraints.
+
+## 9. Production Rule Dictionary
+
+Map each artifact to its unique producer as a total function:
+
+```dafny
+function producedBy(a: Artifact): Step {
+  match a {
+    case RawData       => S1_Trigger
+    case Validated     => S2_Validate
+    case Enriched      => S3_Enrich
+    case IndexData     => S4_Index
+    case Report        => S5_Report
+  }
+}
+```
+
+Every artifact has exactly one producer (totality enforced by exhaustive match).
+Replaces Alloy's `producedBy: one Step` field with a pure function.
+
+## 10. System State as Aggregate
+
+Encapsulate entire system state as a single datatype for invariant checking:
+
+```dafny
+datatype SystemState = SystemState(
+  users: seq<User>,
+  plans: seq<Plan>,
+  subs: seq<Subscription>
+)
+```
+
+All invariants take `SystemState` as input. Allows composing invariants into a single
+`ValidState(st)` predicate. Replaces Alloy's implicit global scope.
+
+## 11. Existence Query via Sequence Search
+
+Replace Alloy's relational lookups with quantified sequence search:
+
+```dafny
+predicate userExists(st: SystemState, uid: UserId) {
+  exists i :: 0 <= i < |st.users| && st.users[i].id == uid
+}
+
+predicate userDeleted(st: SystemState, uid: UserId) {
+  exists i :: 0 <= i < |st.users| && st.users[i].id == uid && st.users[i].deleted
+}
+
+predicate planPublished(st: SystemState, pid: PlanId) {
+  exists i :: 0 <= i < |st.plans| && st.plans[i].id == pid && st.plans[i].published
+}
+```
+
+Always bound the quantifier: `0 <= i < |collection|`. This pattern replaces Alloy's
+`some u: User | u.email = e` with explicit index bounds.
+
+## 12. Uniqueness Constraint
+
+Assert no two distinct elements share a property — mirrors SQL `UNIQUE WHERE`:
+
+```dafny
+predicate PlatformAUnique(st: SystemState) {
+  forall i, j :: 0 <= i < |st.subs| && 0 <= j < |st.subs| && i != j ==>
+    !(st.subs[i].platform.PlatformA? &&
+      st.subs[j].platform.PlatformA? &&
+      st.subs[i].platform.aId == st.subs[j].platform.aId &&
+      !st.subs[i].obsolete &&
+      !st.subs[j].obsolete)
+}
+```
+
+The double quantifier with `i != j` checks all distinct pairs. The negation says "this
+combination is impossible." Replaces Alloy's `lone { s: Sig | condition }`.
+
+## 13. Referential Integrity
+
+Enforce cascade constraints between parent and child entities:
+
+```dafny
+predicate NoLiveSubForDeletedUser(st: SystemState) {
+  forall i :: 0 <= i < |st.subs| ==>
+    (!st.subs[i].obsolete ==>
+      !userDeleted(st, st.subs[i].owner))
+}
+```
+
+Reads as: "for every live (non-obsolete) subscription, the owner is not deleted."
+Replaces Alloy's `fact NoLiveSubForDeletedUser { all u: User | ... }`.
+
+## 14. Composite Invariant Predicate
+
+Bundle all system invariants into one predicate for easy use in lemma preconditions:
+
+```dafny
+predicate ValidState(st: SystemState) {
+  NoLiveSubForDeletedUser(st) &&
+  PlatformAUnique(st) &&
+  PlatformBUnique(st) &&
+  LiveStatusImpliesLive(st) &&
+  ActiveSubRequiresPublishedPlan(st)
+}
+```
+
+Lemmas require `ValidState(st)` instead of listing individual invariants. When you add
+a new invariant, all lemmas automatically include it.
+
+## 15. Transition Matrix
+
+Model a state machine as an explicit transition predicate. All valid edges are enumerated:
+
+```dafny
+predicate ValidTransition(from: FlagStatus, to: FlagStatus) {
+  (from == Draft && to == Staged) ||
+  (from == Staged && to == Active) ||
+  (from == Staged && to == Draft) ||       // rollback
+  (from == Active && to == Deprecated) ||
+  (from == Deprecated && to == Archived) ||
+  (from == to)                             // stutter (stay in place)
+}
+```
+
+Exhaustive enumeration means Dafny can prove properties by evaluating all cases.
+The last line `(from == to)` adds an explicit stutter step (see pattern 20).
+
+## 16. State with History
+
+Track the previous state alongside the current state for single-step reasoning:
+
+```dafny
+datatype Order = Order(status: OrderStatus, previousStatus: OrderStatus)
+
+predicate ValidOrder(o: Order) {
+  (o.status == Created && o.previousStatus == Created) ||
+  (o.status != Created && ValidTransition(o.previousStatus, o.status))
+}
+```
+
+Allows proving properties like "if status is X, the previous state must have been Y"
+without full trace reasoning. Lighter than a full sequence when only one step of history matters.
+
+## 17. Executable Transition Methods
+
+Dafny methods are verified AND compilable. A transition method carries proof obligations:
+
+```dafny
+method TransitionOrder(current: OrderStatus, target: OrderStatus)
+  returns (result: Order)
+  requires ValidTransition(current, target)
+  ensures result.status == target
+  ensures result.previousStatus == current
+  ensures ValidOrder(result)
+{
+  result := Order(target, current);
+}
+```
+
+This produces executable code (compiles to C#/Java/Go/JS) with correctness guaranteed by
+the verifier. Replaces Alloy's `pred` transitions which are specifications only.
+
+## 18. Chained State Progression
+
+Chain transition methods to model a complete workflow:
+
+```dafny
+method ProcessOrder() returns (finalOrder: Order)
+  ensures finalOrder.status == Delivered
+{
+  var o1 := TransitionOrder(Created, PaymentPending);
+  var o2 := TransitionOrder(o1.status, Paid);
+  var o3 := TransitionOrder(o2.status, Shipped);
+  finalOrder := TransitionOrder(o3.status, Delivered);
+}
+```
+
+Each step inherits the previous step's postcondition as the next step's precondition.
+The final `ensures` proves the entire chain reaches the target state.
+
+## 19. Branching Flows
+
+Model alternative paths through the state machine with preconditions:
+
+```dafny
+method CancelOrder(fromStatus: OrderStatus) returns (result: Order)
+  requires fromStatus == Created || fromStatus == PaymentPending || fromStatus == Paid
+  ensures result.status == Cancelled
+{
+  result := TransitionOrder(fromStatus, Cancelled);
+}
+```
+
+The `requires` clause enumerates valid source states. Dafny proves the transition is
+valid for each allowed source.
+
+## 20. Stutter Step
+
+Include self-transitions in the transition matrix to allow "no change" steps:
+
+```dafny
+predicate ValidTransition(from: FlagStatus, to: FlagStatus) {
+  // ... real transitions ...
+  (from == to)  // stutter: system stays in current state
+}
+```
+
+Without stutter, trace-based proofs may fail because the solver can't construct traces
+of the required length. Stutter lets the system "wait" at any state. Replaces Alloy's
+`pred stutter { frameUsers and frameSubs }`.
+
+## 21. Trace as Sequence
+
+Model temporal behavior as a sequence of states with adjacency constraints:
+
+```dafny
+predicate ValidTrace(trace: seq<OrderStatus>) {
+  |trace| >= 1 &&
+  trace[0] == Created &&
+  forall i :: 0 <= i < |trace| - 1 ==> ValidTransition(trace[i], trace[i+1])
+}
+```
+
+This is the fundamental encoding for temporal reasoning in Dafny. Every adjacent pair must
+be a valid transition. The initial state is fixed. Replaces Alloy's `fact Init` + `fact Transitions`.
+
+## 22. Always / Eventually via Quantifiers
+
+Translate Alloy's temporal operators to quantifiers over trace indices:
+
+```dafny
+// Alloy: always P
+// Dafny:
+predicate alwaysHolds(trace: seq<OrderStatus>, P: OrderStatus -> bool) {
+  forall i :: 0 <= i < |trace| ==> P(trace[i])
+}
+
+// Alloy: eventually P
+// Dafny:
+predicate eventuallyHolds(trace: seq<OrderStatus>, P: OrderStatus -> bool) {
+  exists i :: 0 <= i < |trace| && P(trace[i])
+}
+
+// Alloy: P until Q
+// Dafny:
+predicate holdsUntil(trace: seq<OrderStatus>, P: OrderStatus -> bool, Q: OrderStatus -> bool) {
+  exists j :: 0 <= j < |trace| && Q(trace[j]) &&
+    forall i :: 0 <= i < j ==> P(trace[i])
+}
+```
+
+The key difference: Alloy's temporal operators work on infinite traces with lasso structure;
+Dafny works on finite sequences with explicit bounds. Dafny proofs are unbounded in sequence
+length (proves for ALL valid traces), whereas Alloy checks within scope N.
+
+## 23. Inductive Proof over Trace Indices
+
+Prove temporal properties by induction on trace index with a `decreases` metric:
+
+```dafny
+lemma ArchivedIsForever(trace: seq<FlagStatus>, i: int)
+  requires ValidTrace(trace)
+  requires 0 <= i < |trace|
+  requires trace[i] == Archived
+  ensures forall j :: i <= j < |trace| ==> trace[j] == Archived
+  decreases |trace| - i
+{
+  if i < |trace| - 1 {
+    // ValidTransition(Archived, trace[i+1]) forces trace[i+1] == Archived
+    ArchivedIsForever(trace, i + 1);  // inductive step
+  }
+}
+```
+
+Structure: base case (last index — trivial), inductive step (current state constrains next,
+recurse on i+1). The `decreases |trace| - i` proves termination. This pattern replaces
+Alloy's `always` assertions for sink/absorbing states.
+
+## 24. Sink State Verification
+
+Prove a state has no outgoing transitions except to itself:
+
+```dafny
+lemma ArchivedIsSink(from: FlagStatus, to: FlagStatus)
+  requires from == Archived
+  requires ValidTransition(from, to)
+  ensures to == Archived
+{ }
+```
+
+Empty body — Dafny evaluates `ValidTransition(Archived, to)` exhaustively and confirms only
+`to == Archived` satisfies it. Combine with inductive trace proof (pattern 23) to get
+"once archived, always archived."
+
+## 25. Witness Trace Construction
+
+Prove existence of a valid trace by constructing one explicitly:
+
+```dafny
+lemma FullLifecycleExists()
+  ensures exists trace :: ValidTrace(trace) && |trace| == 6
+    && trace[4] == Archived
+{
+  var trace := [Draft, Staged, Active, Deprecated, Archived, Archived];
+  assert ValidTrace(trace);
+}
+```
+
+The SMT solver can struggle with existentials. Providing an explicit witness (the `var trace`)
+lets the solver verify rather than search. The final `assert` discharges the existential.
+
+```dafny
+// Multi-path witness: prove alternative paths exist
+lemma RollbackThenActivateExists()
+  ensures exists trace :: ValidTrace(trace) && |trace| == 5
+    && trace[2] == Draft && trace[4] == Active
+{
+  var trace := [Draft, Staged, Draft, Staged, Active];
+  assert ValidTrace(trace);
+}
+```
+
+## 26. Trace Safety
+
+Prove that once a certain state is reached, another state is unreachable:
+
+```dafny
+lemma CancelledBlocksShipping(trace: seq<OrderStatus>)
+  requires ValidTrace(trace)
+  ensures forall i, j :: 0 <= i < j < |trace| &&
+    trace[i] == Cancelled ==> trace[j] != Shipped
+{
+  // Cancelled is a sink — ValidTransition(Cancelled, x) only allows x == Cancelled
+}
+```
+
+Combines sink state reasoning with trace quantification. The solver evaluates all
+transitions from Cancelled and confirms none lead to Shipped.
+
+## 27. Role x State x Field Access Matrix
+
+Encode field-level permissions as a three-argument predicate with cascading conditions:
+
+```dafny
+predicate canWrite(r: Role, s: TaskState, f: Field) {
+  (r == Admin) ||                                                 // unrestricted
+  (r == Manager && (editable(s) || (s == Active && isActiveAllowed(f)))) ||
+  (r == Owner && !isInternalOnly(f) && editable(s)) ||
+  (r == Author && s == Draft && !isInternalOnly(f))
+  // Viewer, Contact: no branch → always false
+}
+
+predicate canRead(r: Role, f: Field) {
+  !(r == Viewer && isInternalOnly(f))  // viewers can't see internal fields
+}
+```
+
+Absence of a branch for a role means that role always gets `false`. Lemmas extract
+security properties:
+
+```dafny
+lemma ViewerCannotWrite(s: TaskState, f: Field)
+  ensures !canWrite(Viewer, s, f)
+{ }
+
+lemma AllRequiredFieldsSettable(f: Field)
+  requires isRequired(f)
+  ensures canWrite(Owner, Draft, f)
+{ }
+```
+
+## 28. Role-Gated Transitions
+
+Layer authorization on top of the state machine graph:
+
+```dafny
+predicate canTransition(r: Role, from: TaskState, to: TaskState) {
+  validTransition(from, to) &&
+  match (from, to) {
+    case (Draft, Review) => r == Owner || r == Author || r == Admin
+    case (Review, Active) => r == Manager || r == Admin
+    case (_, Cancelled) => r == Owner || r == Admin
+    case _ => r == Manager || r == Admin
+  }
+}
+```
+
+Two layers: `validTransition` checks the graph structure, the `match` checks role permission.
+Both must hold for the transition to be allowed.
+
+## 29. CTA Availability
+
+Map call-to-action buttons to predicates over role and state:
+
+```dafny
+predicate ctaAvailable(cta: Cta, r: Role, s: TaskState) {
+  (cta == CtaView) ||
+  (cta == CtaApprove && (r == Manager || r == Admin) && s == Review) ||
+  (cta == CtaReject && (r == Manager || r == Admin) && s == Review) ||
+  (cta == CtaEstimate && canWrite(r, s, CostBreakdown))
+}
+```
+
+Each CTA maps to a specific capability check. Proves which roles see which buttons in which states.
+
+## 30. Notification Template Design
+
+Model two layers: which states trigger a template, and which CTAs appear per role:
+
+```dafny
+predicate templateTriggeredInState(tmpl: NotificationTemplate, s: TaskState) {
+  (tmpl == CostChange && (s == Draft || s == Review)) ||
+  (tmpl == StatusUpdate) ||  // all states
+  (tmpl == ApprovalRequest && s == Review)
+}
+
+predicate templateHasCta(tmpl: NotificationTemplate, cta: Cta, r: Role) {
+  (tmpl == ApprovalRequest && cta == CtaApprove && (r == Manager || r == Admin)) ||
+  (cta == CtaView)  // always present
+}
+```
+
+Combine with CTA availability (pattern 29) to verify no dead buttons in notification emails.
+
+## 31. Axiomatic Function
+
+Specify behavior via postconditions when the full implementation is too complex or irrelevant:
+
+```dafny
+function dayShift(offset: TzOffset): int
+  requires validOffset(offset)
+  ensures -1 <= dayShift(offset) <= 1
+{
+  if offset >= 12 then 1
+  else if offset <= -12 then -1
+  else 0
+}
+
+function localDay(utcDay: Day, offset: TzOffset): Day
+  requires validOffset(offset)
+{
+  utcDay + dayShift(offset)
+}
+```
+
+The `ensures` contract lets lemmas reason about bounds without knowing the implementation.
+Replaces Alloy's axiomatic `one sig DayMap { of: Timestamp -> Timezone -> one Day }` pattern.
+
+Lemmas prove properties of the axioms:
+
+```dafny
+lemma UtcPreservesDay(utcDay: Day)
+  ensures localDay(utcDay, 0) == utcDay
+{ }
+
+lemma LargerOffsetNeverEarlier(utcDay: Day, o1: TzOffset, o2: TzOffset)
+  requires validOffset(o1) && validOffset(o2) && o1 <= o2
+  ensures localDay(utcDay, o1) <= localDay(utcDay, o2)
+{ }
+```
+
+## 32. Type-Dispatched Behavior
+
+Different behavior per variant, dispatched via `match`:
+
+```dafny
+datatype ColumnKind = WithTZ | WithoutTZ
+
+datatype StoredValue = StoredValue(colKind: ColumnKind, utcDay: Day, wallDay: Day)
+
+function dateCast(v: StoredValue, sessionOffset: TzOffset): Day
+  requires validOffset(sessionOffset)
+{
+  match v.colKind {
+    case WithTZ => localDay(v.utcDay, sessionOffset)
+    case WithoutTZ => v.wallDay
+  }
+}
+```
+
+Lemmas prove type-specific properties:
+
+```dafny
+lemma WithoutTZIgnoresSession(v: StoredValue, o1: TzOffset, o2: TzOffset)
+  requires v.colKind == WithoutTZ
+  requires validOffset(o1) && validOffset(o2)
+  ensures dateCast(v, o1) == dateCast(v, o2)
+{ }
+```
+
+This pattern models any entity with variant-dependent semantics: DB column types,
+serialization formats, encryption modes, API response types.
+
+## 33. Wire Format Encoding/Decoding
+
+Model external data formats and verify codec correctness:
+
+```dafny
+datatype WireTimestamp = WireTimestamp(utcDay: Day)
+
+function correctDecode(t: WireTimestamp): Day { t.utcDay }
+
+function brokenDecode(t: WireTimestamp, offset: TzOffset): Day
+  requires validOffset(offset)
+{ localDay(t.utcDay, offset) }  // bug: double-converts already-local data
+```
+
+Prove the bug exists for specific inputs:
+
+```dafny
+lemma BrokenDecoderWrongForEast(t: WireTimestamp, offset: TzOffset)
+  requires validOffset(offset) && offset >= 12
+  ensures brokenDecode(t, offset) != t.utcDay
+{
+  assert dayShift(offset) == 1;  // hint: shift is +1 for far-east
+}
+```
+
+This pattern catches encoding/decoding bugs where data passes through a pipeline that
+misinterprets its format (wire-format vs DB storage, local time vs UTC).
+
+## 34. Effect Bag / Metric Aggregation
+
+Model typed contributions to a metric instead of raw integer accumulation:
+
+```dafny
+datatype Intensity = NoEffect | SmallEffect | MediumEffect | LargeEffect
+
+datatype Reading = Reading(sensorOffset: TzOffset, utcDay: Day, intensity: Intensity)
+
+predicate activates(r: Reading) { r.intensity != NoEffect }
+
+function readingLocalDay(r: Reading): Day
+  requires validOffset(r.sensorOffset)
+{ localDay(r.utcDay, r.sensorOffset) }
+
+predicate contributes(r: Reading, targetDay: Day)
+  requires validOffset(r.sensorOffset)
+{ activates(r) && readingLocalDay(r) == targetDay }
+```
+
+Prove cross-timezone divergence:
+
+```dafny
+lemma CrossTZDisjointDays(r1: Reading, r2: Reading)
+  requires validOffset(r1.sensorOffset) && validOffset(r2.sensorOffset)
+  requires r1.sensorOffset >= 12 && r2.sensorOffset <= -12
+  requires r1.utcDay == r2.utcDay
+  ensures readingLocalDay(r1) != readingLocalDay(r2)
+{
+  assert dayShift(r1.sensorOffset) == 1;
+  assert dayShift(r2.sensorOffset) == -1;
+}
+```
+
+This pattern avoids integer overflow while proving properties about aggregation windows.
+
+## 35. Sliding Window with Offset
+
+Verify which records fall inside or outside a time-based window under timezone shifts:
+
+```dafny
+predicate inWindow(r: Reading, targetDay: Day, windowSize: nat)
+  requires validOffset(r.sensorOffset)
+{
+  var ld := readingLocalDay(r);
+  targetDay - windowSize as int <= ld && ld <= targetDay + windowSize as int
+}
+
+lemma TimezoneCanBreakWindow(r: Reading, targetDay: Day)
+  requires validOffset(r.sensorOffset) && r.sensorOffset >= 12
+  requires r.utcDay == targetDay
+  ensures !inWindow(r, targetDay, 0)
+{
+  assert dayShift(r.sensorOffset) == 1;
+  // readingLocalDay(r) == targetDay + 1, outside [targetDay, targetDay]
+}
+```
+
+Catches off-by-one and boundary-shift bugs in window-based attribution, billing cycles,
+retention periods.
+
+## 36. Pipeline DAG with Dependencies
+
+Model multi-step pipelines as steps producing/consuming artifacts:
+
+```dafny
+predicate stepRequires(s: Step, a: Artifact): bool {
+  match s {
+    case S1_Trigger     => false  // no inputs
+    case S2_Validate    => a == RawData
+    case S3_Enrich      => a == Validated || a == RawData
+    case S4_Index       => a == Enriched
+    case S5_Report      => a == IndexData || a == Enriched
+  }
+}
+
+// THE KEY LEMMA: no step uses artifacts from the future
+lemma DependenciesSatisfied(s: Step, a: Artifact)
+  requires stepRequires(s, a)
+  ensures stepAtOrBefore(producedBy(a), s)
+{ }
+
+lemma AllDependenciesSatisfied()
+  ensures forall s: Step, a: Artifact ::
+    stepRequires(s, a) ==> stepAtOrBefore(producedBy(a), s)
+{
+  forall s: Step, a: Artifact | stepRequires(s, a)
+    ensures stepAtOrBefore(producedBy(a), s)
+  {
+    DependenciesSatisfied(s, a);
+  }
+}
+```
+
+The forall dispatch pattern (see pattern 44) proves the property for every (Step, Artifact) pair.
+
+## 37. Artifact Versioning & Staleness
+
+Track mutable artifacts that get overwritten by multiple steps:
+
+```dafny
+datatype ArtifactVersion = ArtifactVersion(artifact: Artifact, writtenBy: Step, version: nat)
+
+predicate isStale(consumer: Step, art: Artifact, v1: ArtifactVersion, v2: ArtifactVersion) {
+  v1.artifact == art && v2.artifact == art &&
+  v1.version < v2.version &&
+  stepBefore(v1.writtenBy, consumer) &&
+  stepBefore(v2.writtenBy, consumer)
+}
+```
+
+A consumer sees stale data when a newer version exists from an earlier step. This pattern
+is essential for pipelines with caches, indices, or snapshot artifacts.
+
+## 38. Proof of Work (Evidence Tracking)
+
+Enforce that verification steps produce specific evidence — prevents hollow "all passed" outputs:
+
+```dafny
+datatype ProofOfWork = ProofOfWork(
+  step: Step,
+  requiresCheckResults: bool,
+  requiresScenarioTrace: bool,
+  requiresCounterexplanation: bool
+)
+
+predicate proofOfWorkSatisfied(
+  pow: ProofOfWork,
+  hasChecks: bool,
+  hasTraces: bool,
+  hasExplanation: bool
+) {
+  (!pow.requiresCheckResults || hasChecks) &&
+  (!pow.requiresScenarioTrace || hasTraces) &&
+  (!pow.requiresCounterexplanation || hasExplanation)
+}
+```
+
+Valuable for AI/LLM pipelines where intermediate verification can produce plausible
+but ungrounded reports.
+
+## 39. Resolved Choice (OR-Dependency)
+
+Model "needs A or B" as a decision that resolves before the step runs:
+
+```dafny
+datatype RuntimeOption = UseLocalJava | UseDocker
+
+predicate runtimeDependency(choice: RuntimeOption, a: Artifact): bool {
+  match choice {
+    case UseLocalJava => a == RunScript || a == LocalJava
+    case UseDocker    => a == RunScript || a == DockerEngine
+  }
+}
+```
+
+The choice is a value, not a runtime branch. Lemmas can prove properties for each option
+independently. Replaces the need for set-level OR in dependency relations.
+
+## 40. Empty-Body Lemma
+
+When the predicate is defined by exhaustive pattern matching, the lemma body can be empty —
+Dafny evaluates all cases automatically:
+
+```dafny
+lemma NoCancelledShipment(o: Order)
+  requires ValidOrder(o)
+  requires o.status == Cancelled
+  ensures o.previousStatus != Shipped
+{ }
+```
+
+The verifier unfolds `ValidOrder(o)` and `ValidTransition(o.previousStatus, Cancelled)`,
+checks all cases where `to == Cancelled`, and confirms none have `from == Shipped`.
+
+This is the most common proof pattern in Dafny — if your definitions are complete, most
+lemmas prove themselves.
+
+## 41. Witness Construction
+
+Help the SMT solver with existentials by providing explicit values:
+
+```dafny
+lemma UpgradePreservesUniqueness()
+{
+  var u := User(0, false);
+  var p := Plan(0, true);
+  var s := Subscription(0, 0, SubActive, false, PlatformA(0));
+  var st := SystemState([u], [p], [s]);
+
+  // Guide solver with intermediate assertions
+  assert planPublished(st, 0);
+  assert ValidState(st);
+}
+```
+
+Without the explicit construction, the solver may timeout trying to find a satisfying
+assignment. Intermediate `assert` statements break the proof into steps the solver can handle.
+
+## 42. Contrapositive Restatement
+
+Prove the contrapositive of an invariant by restating it as a lemma:
+
+```dafny
+// Invariant: live status implies not obsolete
+// Contrapositive: obsolete implies not live status
+lemma ObsoleteIsNeverLive(st: SystemState, subIdx: int)
+  requires ValidState(st)
+  requires 0 <= subIdx < |st.subs|
+  requires st.subs[subIdx].obsolete
+  ensures st.subs[subIdx].status != SubActive
+  ensures st.subs[subIdx].status != SubInactive
+  ensures st.subs[subIdx].status != SubCanceled
+{ }
+```
+
+Empty body — the verifier recognizes this as the contrapositive of `LiveStatusImpliesLive`
+from `ValidState`.
+
+## 43. Assert Hint for SMT Guidance
+
+When the solver needs help, add `assert` statements as intermediate proof steps:
+
+```dafny
+lemma BrokenDecoderWrongForEast(t: WireTimestamp, offset: TzOffset)
+  requires validOffset(offset) && offset >= 12
+  ensures brokenDecode(t, offset) != t.utcDay
+{
+  assert dayShift(offset) == 1;  // hint: tell solver what dayShift evaluates to
+  // now solver can see: brokenDecode(t, offset) = t.utcDay + 1 != t.utcDay
+}
+```
+
+Each `assert` creates a sub-goal the solver proves independently, then uses as a known fact
+for subsequent goals. Use sparingly — too many hints make proofs fragile.
+
+## 44. Exhaustive Forall Dispatch
+
+Prove a universally quantified property by dispatching to a per-case lemma:
+
+```dafny
+lemma AllDependenciesSatisfied()
+  ensures forall s: Step, a: Artifact ::
+    stepRequires(s, a) ==> stepAtOrBefore(producedBy(a), s)
+{
+  forall s: Step, a: Artifact | stepRequires(s, a)
+    ensures stepAtOrBefore(producedBy(a), s)
+  {
+    DependenciesSatisfied(s, a);  // per-case lemma
+  }
+}
+```
+
+The `forall` block inside the lemma body is Dafny's way of proving a universally quantified
+postcondition. Each iteration calls a helper lemma that handles one (s, a) pair.
+
+## 45. Gap Assertion (Expected Failure)
+
+Document known design gaps as lemmas that would fail if uncommented:
+
+```dafny
+// This lemma would FAIL if uncommented — proves a design gap exists.
+// ApprovalRequest template sends CtaApprove to all roles,
+// but only Manager/Admin can approve. A Viewer receiving CtaApprove
+// would see a dead button.
+//
+// lemma AllCtasValid_EXPECTED_FAIL()
+//   ensures forall tmpl, cta, r, s ::
+//     templateTriggeredInState(tmpl, s) &&
+//     templateHasCta(tmpl, cta, r) ==>
+//     ctaAvailable(cta, r, s)
+// { }  // WOULD FAIL: templateHasCta sends CtaApprove to Viewer
+
+// The fix: filter CTAs by role capability in templateHasCta
+```
+
+Gap assertions are valuable for: proving a bug exists (concrete evidence for stakeholders),
+validating a fix (uncomment after fixing — it should pass), documenting known limitations.
+
+## 46. Equivalence Classes
+
+Replace continuous values with discrete behavior-triggering classes:
+
+```dafny
+datatype AmountClass = UnderThreshold | MidRange | OverThreshold
+
+datatype Invoice = Invoice(amount: AmountClass, status: InvoiceStatus, approvedBy: set<Role>)
+
+predicate validApproval(i: Invoice) {
+  i.status == Approved ==>
+    ((i.amount == UnderThreshold && Reviewer in i.approvedBy) ||
+     (i.amount == MidRange && (Reviewer in i.approvedBy || Admin in i.approvedBy)) ||
+     (i.amount == OverThreshold && Reviewer in i.approvedBy && Finance in i.approvedBy))
+}
+
+lemma DualApprovalForLargeInvoices(i: Invoice)
+  requires validApproval(i)
+  requires i.status == Approved && i.amount == OverThreshold
+  ensures |i.approvedBy| >= 2
+{ }
+```
+
+Dafny proves this for ALL inputs — no scope bound needed. The solver checks every
+class-role combination exhaustively. Use when behavior depends on range membership,
+not exact values.

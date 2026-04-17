@@ -1,0 +1,83 @@
+# Alloy vs Dafny: Concept and Syntax Comparison
+
+Quick reference for translating between Alloy 6 and Dafny. Use when porting models
+or choosing which tool to use for a specific construct.
+
+## Concept mapping
+
+| Alloy concept | Dafny equivalent | Notes |
+|---------------|-----------------|-------|
+| `abstract sig` + `one sig` enum | `datatype` | Direct mapping, cleaner syntax in Dafny |
+| `sig` (entity) | `datatype` or `class` | Dafny datatypes are immutable; use class for mutable state |
+| `field: one T` | field in datatype constructor | Alloy relations map to Dafny fields or functions |
+| `field: lone T` | `Option<T>` or `field?: T` | Nullable/optional fields |
+| `field: set T` | `set<T>` | Direct mapping |
+| `fact` (invariant) | `requires` / `predicate` | Facts become preconditions or standalone predicates |
+| `pred` (predicate) | `predicate` / `function returns bool` | Similar semantics |
+| `fun` (function) | `function` | Direct mapping |
+| `assert` + `check` | `lemma` + `ensures` | Dafny proves for ALL inputs, not bounded scope |
+| `run` (instance generation) | explicit witness in lemma body | Must construct the example manually |
+| `for N` (scope bound) | N/A | Dafny proves unbounded; no scope needed |
+| `util/ordering[Step]` | `function stepIndex(s): nat` | Total order via integer index |
+| `requires: set Artifact` | `predicate stepRequires(s, a)` | Relation as binary predicate |
+| `producedBy: one Step` | `function producedBy(a): Step` | Total function |
+| Relational join `.` | Function application or map lookup | `u.subs` becomes `getSubs(u)` |
+| Transitive closure `^r` | Recursive predicate or `imap` | Must encode reachability manually |
+| Set comprehension `{ x: T \| P }` | `set x: T \| P(x)` | Similar syntax |
+| Relation override `++` | Map update syntax | `owner' = owner ++ (s -> u)` becomes `owner[s := u]` |
+
+## Temporal constructs
+
+| Alloy 6 temporal | Dafny encoding | Complexity |
+|-----------------|----------------|------------|
+| `var sig` (mutable set) | `seq<State>` + index | Manual trace encoding |
+| `always P` | `forall i :: 0 <= i < \|trace\| ==> P(trace[i])` | Quantifier over indices |
+| `eventually P` | `exists i :: 0 <= i < \|trace\| && P(trace[i])` | Existential over indices |
+| `until P Q` | `exists j :: Q(trace[j]) && forall i :: i < j ==> P(trace[i])` | Manual encoding |
+| `after P` / `P'` | `P(trace[i+1])` | Next-state via index arithmetic |
+| Frame conditions | Explicit `ensures old(x) == x` | Must list every unchanged field |
+| `stutter` step | Identity transition in trace | Must include explicitly |
+| Infinite traces (lasso) | Finite prefix + inductive argument | Harder to express |
+
+## Type system differences
+
+| Concept | Alloy | Dafny |
+|---------|-------|-------|
+| Subtyping | `sig Sub extends Base` | Datatype constructors or trait inheritance |
+| Disjoint subtypes | `extends` is automatically disjoint | Must prove disjointness |
+| Mutable fields | `var` keyword on field or sig | Class fields (default mutable) |
+| Immutable fields | Default (no `var`) | Datatype fields (default immutable) |
+| Sets | First-class (`set T`, relational algebra) | `set<T>` with comprehensions |
+| Relations (binary+) | First-class (`T -> U -> V`) | Encoded as `map<T, U>` or predicates |
+| Sequences | `seq T` (indexed) | `seq<T>` (indexed, richer API) |
+| Integers | `Int` (bitwidth-bounded) | `int` (unbounded), `nat` (non-negative) |
+
+## Verification semantics
+
+| Aspect | Alloy | Dafny |
+|--------|-------|-------|
+| Proof method | SAT/SMT within bounded scope | SMT for all inputs (unbounded) |
+| Soundness | Complete within scope, may miss bugs beyond | Sound — if it proves, it holds universally |
+| Counterexamples | Concrete atoms + relations visualized | "Postcondition might not hold at line N" |
+| UNSAT explanation | UNSAT cores show conflicting constraints | No minimal failing set |
+| Scope control | `for N` bounds atom counts | N/A — always universal |
+| Performance | Scales with scope size | Scales with proof complexity |
+
+## Porting effort by model type
+
+| Model type | Difficulty | Why |
+|-----------|------------|-----|
+| Static (snapshot) | **Medium** | Direct translation, but need explicit proof structure |
+| Temporal (traces) | **Hard** | No built-in `always`/`eventually`; encode as sequences with inductive proofs |
+| UX / access matrix | **Hard** | Relational algebra (role x state x field) maps poorly to predicates |
+| Pipeline / DAG | **Medium** | DAG verification natural in both; Dafny adds reachability proofs |
+| Reconciliation | **N/A** | Workflow step, not a formal model — doesn't port |
+
+## Error message comparison
+
+| Scenario | Alloy output | Dafny output |
+|----------|-------------|-------------|
+| Assertion violated | Concrete counterexample with atoms, relations, trace | "postcondition might not hold at line N" |
+| Contradictory constraints | UNSAT core showing conflicting facts | "precondition might not hold" (no minimal set) |
+| Timeout | "no solution found within scope" | Resource limit exceeded (rlimit) |
+| Successful verification | "no counterexample found for scope N" | "verified" with per-lemma timing |

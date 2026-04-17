@@ -1,0 +1,10 @@
+# Alloy runtime cache — populated by alloy_run.sh on first run
+# (the jar is downloaded from the official AlloyTools release, extracted
+# locally, and the compiled runner is placed alongside).
+skills/formal-modeling/scripts/.alloy/
+
+# Workspace/eval outputs
+*-workspace/
+
+# OS files
+.DS_Store
