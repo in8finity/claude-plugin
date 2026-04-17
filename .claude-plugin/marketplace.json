@@ -2,7 +2,7 @@
   "name": "morozov-claude-plugin",
   "owner": {
     "name": "Alexander Morozov",
-    "email": "contact@a-morozov.info"
+    "email": "contact@a-morozov.com"
   },
   "metadata": {
     "description": "Formal methods skills for modeling and debugging software systems using Alloy 6 and Dafny",
