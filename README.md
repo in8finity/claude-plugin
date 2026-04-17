@@ -163,6 +163,8 @@ Copyright (c) 2026 Alexander Morozov.
 
 You are free to share and adapt the material for non-commercial purposes, provided you give appropriate attribution and distribute any derivative works under the same license.
 
+**Commercial use** — using this plugin as part of paid development work, or shipping derivative works commercially, requires a separate commercial license. See [`COMMERCIAL.md`](./COMMERCIAL.md) for who needs one, what it grants, and how to request one. Your own code, models, and reports produced with help from the plugin are not derivative works and remain yours regardless of license tier — the formal analysis is at [`system-models/derived-claude-code-work/report.md`](./system-models/derived-claude-code-work/report.md).
+
 **Third-party components** — the Alloy 6 distribution is downloaded at runtime by `scripts/alloy_run.sh` from the official AlloyTools GitHub releases, not redistributed by this repository. The skill's `AlloyRunner` pins `minisat.prover` (MIT, with unsat-core support) as the SAT backend and `sat4j` (LGPL) as platform fallback — ZChaff and Lingeling are present in the downloaded distribution but never invoked. See [`NOTICE`](./NOTICE) and [`THIRD_PARTY_LICENSES.md`](./THIRD_PARTY_LICENSES.md) for the full breakdown.
 
 The runtime-fetch + pinning design is documented in [`system-models/reports/license-compatibility-reconciliation.md`](./system-models/reports/license-compatibility-reconciliation.md) — it keeps this repository out of the ZChaff/Lingeling redistribution chain while preserving commercially-compatible solver capability for users whose downstream use may not be noncommercial.
