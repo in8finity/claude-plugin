@@ -46,13 +46,25 @@ one sig NoCommercial       extends Restriction {}
 one sig ResearchOnly       extends Restriction {}
 one sig NoSATCompetitions  extends Restriction {}
 
+-- Linking modes — shared vocabulary with the linking model
+-- (system-models/license-linking/license-linking.als). Each license
+-- declares the subset of modes across which its copyleft propagates
+-- to the caller / containing work. This replaces the earlier binary
+-- `forbidsAdditionalRestrictions` field (see FM3 in the Round 1
+-- reconciliation report; closed by this refactor).
+abstract sig LinkMode {}
+one sig MereAggregation  extends LinkMode {}
+one sig DynamicLink      extends LinkMode {}
+one sig StaticLink       extends LinkMode {}
+one sig SourceDerivation extends LinkMode {}
+
 abstract sig License {
-  requiresAttribution          : one Bool,
-  requiresLicensePreservation  : one Bool,
-  shareAlike                   : one Bool,
-  copyleft                     : one Copyleft,
-  forbidsAdditionalRestrictions: one Bool,
-  restrictions                 : set Restriction
+  requiresAttribution         : one Bool,
+  requiresLicensePreservation : one Bool,
+  shareAlike                  : one Bool,
+  copyleft                    : one Copyleft,
+  propagatesAcross            : set LinkMode,
+  restrictions                : set Restriction
 }
 
 -- ─── Concrete licenses ──────────────────────────────────────────────
@@ -71,63 +83,71 @@ fact LicenseProfiles {
   MIT.requiresLicensePreservation = True
   MIT.shareAlike = False
   MIT.copyleft = NoCopyleft
-  MIT.forbidsAdditionalRestrictions = False
+  no MIT.propagatesAcross
   no MIT.restrictions
 
-  -- LGPL 2.1 (weak copyleft on library files; permits aggregation)
+  -- LGPL 2.1 — weak copyleft. §6 carves out dynamic linking; §2 carves
+  -- out mere aggregation. Only static linking and source-level modifications
+  -- propagate LGPL to the containing work.
   LGPL21.requiresAttribution = True
   LGPL21.requiresLicensePreservation = True
   LGPL21.shareAlike = True
   LGPL21.copyleft = LibraryLevel
-  LGPL21.forbidsAdditionalRestrictions = True
+  LGPL21.propagatesAcross = StaticLink + SourceDerivation
   no LGPL21.restrictions
 
-  -- MPL 2.0 (file-level copyleft; explicitly permits differently-licensed aggregation)
+  -- MPL 2.0 — file-level copyleft. §3.3 explicitly permits combining
+  -- with differently-licensed code; only modifications to MPL files stay MPL.
   MPL20.requiresAttribution = True
   MPL20.requiresLicensePreservation = True
   MPL20.shareAlike = True
   MPL20.copyleft = FileLevel
-  MPL20.forbidsAdditionalRestrictions = True
+  MPL20.propagatesAcross = SourceDerivation
   no MPL20.restrictions
 
-  -- CC BY-NC-SA 4.0 (our top-level; whole-program copyleft via SA on adapted material)
+  -- CC BY-NC-SA 4.0 — our top-level. §1(l) Collection carve-out means
+  -- aggregation does not create Adapted Material; SA applies only to
+  -- derivatives of the licensed work (SourceDerivation).
   CCBYNCSA40.requiresAttribution = True
   CCBYNCSA40.requiresLicensePreservation = True
   CCBYNCSA40.shareAlike = True
   CCBYNCSA40.copyleft = WholeProgram
-  CCBYNCSA40.forbidsAdditionalRestrictions = True
+  CCBYNCSA40.propagatesAcross = SourceDerivation
   CCBYNCSA40.restrictions = NoCommercial
 
-  -- ZChaff (Princeton NC, research only)
+  -- ZChaff (Princeton NC, research only). Permissive on combination
+  -- modes but restrictive on field of use.
   ZChaffNC.requiresAttribution = True
   ZChaffNC.requiresLicensePreservation = True
   ZChaffNC.shareAlike = False
   ZChaffNC.copyleft = NoCopyleft
-  ZChaffNC.forbidsAdditionalRestrictions = False
+  no ZChaffNC.propagatesAcross
   ZChaffNC.restrictions = NoCommercial + ResearchOnly
 
-  -- Lingeling (Biere NC, no SAT competitions)
+  -- Lingeling (Biere NC, no SAT competitions). Same structure as ZChaff.
   LingelingNC.requiresAttribution = True
   LingelingNC.requiresLicensePreservation = True
   LingelingNC.shareAlike = False
   LingelingNC.copyleft = NoCopyleft
-  LingelingNC.forbidsAdditionalRestrictions = False
+  no LingelingNC.propagatesAcross
   LingelingNC.restrictions = NoCommercial + NoSATCompetitions
 
-  -- Glucose-Syrup (MIT-base + no SAT competitions for parallel version)
+  -- Glucose-Syrup (MIT-base + no SAT competitions for parallel version).
   GlucoseMITPlus.requiresAttribution = True
   GlucoseMITPlus.requiresLicensePreservation = True
   GlucoseMITPlus.shareAlike = False
   GlucoseMITPlus.copyleft = NoCopyleft
-  GlucoseMITPlus.forbidsAdditionalRestrictions = False
+  no GlucoseMITPlus.propagatesAcross
   GlucoseMITPlus.restrictions = NoSATCompetitions
 
-  -- GPL 3 (for counterexamples only)
+  -- GPL 3 (for counterexamples only) — strong copyleft. Propagates
+  -- across every linking mode except pure aggregation (§5).
+  -- Conservatively includes DynamicLink, matching the FSF reading.
   GPL3.requiresAttribution = True
   GPL3.requiresLicensePreservation = True
   GPL3.shareAlike = True
   GPL3.copyleft = WholeProgram
-  GPL3.forbidsAdditionalRestrictions = True
+  GPL3.propagatesAcross = DynamicLink + StaticLink + SourceDerivation
   no GPL3.restrictions
 }
 
@@ -242,13 +262,17 @@ assert CopyleftFilesUnmodified {
     implies c.isModified = False
 }
 
--- A5: no strong copyleft (GPL-like) inside an NC package — GPL § 7 forbids
---    adding further restrictions like NC, so aggregation would violate GPL.
+-- A5: no bundled third-party component propagates copyleft across
+--    DynamicLink. The load-bearing concern is GPL, whose propagation
+--    via dynamic linking would conflict with -NC once any runtime
+--    interaction is introduced. LGPL is safe here (carves out
+--    DynamicLink); MPL and CC are safe (propagate only via source
+--    derivation). This is a tripwire at bundle boundary — the detailed
+--    propagation analysis lives in the sibling linking model.
 assert NoStrongCopyleftConflict {
-  all c: Component | c.bundled = True and c != OriginalWork
-    and c.license.copyleft = WholeProgram
-    and c.license.forbidsAdditionalRestrictions = True
-    implies NoCommercial not in Package.topLevelLicense.restrictions
+  no c: Component |
+    c.bundled = True and c != OriginalWork
+    and DynamicLink in c.license.propagatesAcross
 }
 
 -- A6: every bundled component's restrictions flow up into the package's
@@ -278,10 +302,8 @@ run CurrentPackagingValid {
     implies Package.permitsCommercialUse = False)
   and (all c: Component | c.bundled = True and c.license.copyleft != NoCopyleft
     and c != OriginalWork implies c.isModified = False)
-  and (all c: Component | c.bundled = True and c != OriginalWork
-    and c.license.copyleft = WholeProgram
-    and c.license.forbidsAdditionalRestrictions = True
-    implies NoCommercial not in Package.topLevelLicense.restrictions)
+  and (no c: Component | c.bundled = True and c != OriginalWork
+    and DynamicLink in c.license.propagatesAcross)
   and (all c: Component, r: Restriction |
     c.bundled = True and r in c.license.restrictions
     implies r in Package.effectiveRestrictions)

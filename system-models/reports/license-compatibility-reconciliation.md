@@ -29,7 +29,7 @@ round inventories new drifts introduced by the remediation itself.)
 | D2 — Lingeling redistribution outside grant scope | **Closed** on three independent axes: not redistributed, not invoked, not present on disk after strip. |
 | FM1 — Lingeling's "evaluation and research only" whitelist not modeled | **Moot.** Lingeling is no longer part of the package at all, so its whitelist does not apply. Model now sets `Lingeling.bundled = False`. |
 | FM2 — ZChaff distribution consent not modeled | **Moot.** Same reason — ZChaff is `bundled = False` in the updated model. |
-| FM3 — `forbidsAdditionalRestrictions` field is binary where reality is scoped (LGPL/MPL aggregation carve-outs) | **Deferred.** The model remains correct because A5 only fires for `WholeProgram` copyleft, so aggregation with LGPL/MPL passes. The field name is still mildly misleading; renaming postponed as a low-priority cleanup. |
+| FM3 — `forbidsAdditionalRestrictions` field is binary where reality is scoped (LGPL/MPL aggregation carve-outs) | **Closed.** Superseded by the linking model's `propagatesAcross: set LinkMode`. The aggregation model was refactored to share that vocabulary — each license now declares the specific linking modes across which its copyleft propagates (LGPL: StaticLink + SourceDerivation; MPL: SourceDerivation; GPL: DynamicLink + StaticLink + SourceDerivation; etc.), and A5 was rewritten to check `DynamicLink in c.license.propagatesAcross` instead of the old binary flag. All 6 aggregation assertions still pass post-refactor. |
 
 ## FixModel applied this round
 
@@ -79,7 +79,7 @@ All 23 properties from Round 1 remain aligned, plus three new claims about the r
 
 1. **None blocking.** The model now faithfully represents the implementation, and the implementation is consistent with every upstream license text as interpreted in Round 1.
 2. **Optional — Round 3 model extension.** Add `Component.isInvoked: Bool` and an assertion *"the runner never invokes a noncommercial solver"* (`all c: Component | c.isInvoked = True implies NoCommercial not in c.license.restrictions`). This would let the model prove the value of the pinning step at the SAT-backend level, not just the presence level.
-3. **Optional — FM3 cleanup.** Rename `License.forbidsAdditionalRestrictions` to `forbidsRestrictionsOnCopyleftFiles` and split the aggregation case explicitly. Low value; the model is already correct.
+3. **FM3 cleanup — completed.** Superseded by the linking model's `propagatesAcross`; the aggregation model was refactored to share that vocabulary. See the updated FM3 row in the summary table above.
 
 ## Verdict
 
