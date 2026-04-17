@@ -76,7 +76,7 @@ All commands below are slash commands — type them inside a Claude Code session
 **From GitHub:**
 
 ```
-/plugin marketplace add <your-username>/morozov-claude-plugin
+/plugin marketplace add in8finity/claude-plugin
 ```
 
 **From a local clone:**
