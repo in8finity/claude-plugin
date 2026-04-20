@@ -36,7 +36,7 @@ SOC2, PCI-DSS) → note explicitly. Write `## Symptom` + `**Severity:**` into th
 
 #### Step 0a. Inventory tooling
 
-Check `investigations/tooling-inventory.md` first (template at `<skill-dir>/tooling-inventory.md`).
+Check `investigations/tooling-inventory.md` first (template at `<skill-dir>/templates/tooling-inventory.md`).
 Determine: production DB, logs, metrics, tracing, error tracking, live API, config, queues,
 repo, CI/CD. Write `## Tooling` noting `direct` vs `inferred` per tool.
 
@@ -51,6 +51,12 @@ Update `## Symptom` with `**Verified by:**` citing E1.
 
 Requires `formal-modeling` skill. Check production logs/traces for the actual execution path
 before writing model code. Append findings to `evidence-log.md`.
+
+**Locating modeling tooling.** The `formal-modeling` skill ships the Alloy/Dafny runners
+(`alloy_run.sh`, `dafny_run.sh`, `verify.sh`) and reference `.als`/`.dfy` examples. When
+installed as a plugin, look under `~/.claude/plugins/marketplaces/*/skills/formal-modeling/`
+(`scripts/` for runners, `references/` for example models). If not found there, check
+`~/.claude/skills/formal-modeling/` or ask the user for the install path before proceeding.
 
 **Default: create a formal model file** (`.dfy` for fast iteration, `.als` for counterexamples).
 The verifier catches edge cases that narrative reasoning misses. Run it, don't just write it.
@@ -268,6 +274,6 @@ Tenant isolation, Auth state, Deployment drift, Multi-artifact versions, Build p
 
 ## Bundled files
 
-- `tooling-inventory.md` — Template for tooling inventory. Copy into the project's
+- `templates/tooling-inventory.md` — Template for tooling inventory. Copy into the project's
   `investigations/` directory and fill in. The skill reads it at Step 0a to avoid
   re-enumerating tools each investigation.
