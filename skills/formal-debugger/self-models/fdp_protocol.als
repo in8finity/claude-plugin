@@ -3,30 +3,60 @@ module FormalDebuggerProtocol
 /*
  * Formal model of the Formal Debugger skill's investigation protocol.
  *
- * Models the outer loop (Steps 0-8), hypothesis lifecycle, fact collection,
- * and the anti-false-positive rules (H1/H2, T1/T2, U1/U2, M1/M2, F1/F2, PV1/PV2).
+ * This is the MONOLITH — a single-file reference covering the outer loop
+ * (Steps 0-8), hypothesis lifecycle, fact collection, and the core
+ * anti-false-positive rules. Segments are authoritative for newer TCs.
  *
- * Naming: SKILL.md defines H2 as the falsifiability rule ("state what observation
- * would make it false"). FZ1/FZ2 elaborate H2 — FZ1 requires a counterfactual,
- * FZ2 distinguishes observable vs theoretical falsifiability. The model uses
- * H2_FZ1 for the combined gate.
+ * Naming: SKILL.md defines H2 as the falsifiability rule. FZ1/FZ2 elaborate
+ * H2 — FZ1 requires a counterfactual, FZ2 distinguishes observable vs
+ * theoretical falsifiability. H2_FZ1 is the combined gate.
  *
- * Key safety properties verified:
+ * TC coverage map (SKILL.md has 35 termination conditions currently):
+ *
+ *   TC1-TC18: base termination gate        — this monolith (FullAcceptanceGate)
+ *   TC19: production-first ordering        — this monolith + fdp_fact_ordering.als
+ *   TC20 (F1): reliability tagging         — fdp_source_classification.als
+ *   TC21: status transitions               — this monolith
+ *   TC22 (F4): fix-task first-fact         — this monolith + fdp_source_classification.als
+ *   TC23 (F3): dynamic data verification   — fdp_dynamic_data.als + this monolith
+ *   TC24 (F6): cross-source absence        — fdp_evidence_quality.als
+ *   TC25 (F7): write-path                  — fdp_evidence_quality.als
+ *   TC26 (F8): numeric exact-local         — fdp_evidence_quality.als
+ *   TC27 (F9): snapshot temporality        — fdp_evidence_quality.als
+ *   TC28 (PV2) tightened skip protocol     — fdp_skip_protocol.als (propose→ack→entry)
+ *                                            This monolith has the older TC24/TC28 form.
+ *   TC29: PW0-init stub layout             — fdp_temporal_core.als
+ *   TC30: structured hash chain (PW0-live) — fdp_structured_chain.als
+ *   TC31 (S0-V.1): symptom proximity       — fdp_symptom_proximity.als
+ *   TC32 (F10): baseline comparability     — fdp_baseline_comparability.als
+ *   TC33 (F11): workspace contamination    — GAP8 exclusion (harness-level, git-based)
+ *   TC34 (OB1): observability ordering     — fdp_intervention_ordering.als
+ *   TC35 (U2-doc): rejection reasons       — fdp_rejection_reasons.als
+ *
+ * Key safety properties verified HERE:
  *   - Symptom must be verified by direct evidence before Step 1 (S0-V)
  *   - Model cannot be built without production evidence (FM1)
  *   - No hypothesis accepted without production-grade evidence (PV1)
  *   - No hypothesis accepted with undistinguished alternatives (U1)
- *   - No termination without blind-spot review (M1)
- *   - Model cannot be skipped without production evidence (PV2)
+ *   - No termination without blind-spot review (M1, boolean form)
+ *   - Model cannot be skipped without production evidence (PV2, base form)
  *   - Every accepted hypothesis has mechanism + counterfactual (H1, H2/FZ1)
  *   - Unobservable counterfactual blocks verification and acceptance (FZ2)
  *   - Evidence log must have direct entry (PW1), model re-run after facts (PW2)
+ *   - Production-first ordering on fact collection (TC19)
  *   - Interpreted evidence alone cannot drive acceptance
  *
- * Gaps / exclusions:
+ * Gaps / exclusions (in the MONOLITH only — see segments for full coverage):
  *   - Alloy model construction details (solver interaction) not modeled
  *   - User interaction (supervised vs autonomous mode) abstracted
- *   - Specific cause classes in M1 checklist abstracted to a boolean
+ *   - M1 cause classes abstracted to a boolean (the 14-class enum lives in
+ *     the Dafny model as `causeClassesCovered`)
+ *   - Hash chain integrity and per-record structure (TC30) modeled in
+ *     fdp_structured_chain.als, not here
+ *   - Versioned reports (investigation-report-<N>_*.md) modeled in
+ *     fdp_structured_chain.als and the Dafny ReportRecord datatype
+ *   - Tightened skip protocol (verbatim Acknowledgement, later-turn entry)
+ *     modeled in fdp_skip_protocol.als
  */
 
 -- ============================================================
@@ -1265,3 +1295,35 @@ run EquivalenceForcesDeepening {
     eventually (h1.status = Undistinguished
       and eventually Investigation.currentStep = S7_Deepen)
 } for 4 but exactly 2 Hypothesis, exactly 1 Fact, 2 Check, 16 steps
+
+-- ============================================================
+-- CROSS-SEGMENT COVERAGE NOTES
+-- ============================================================
+-- The monolith above models TC1-TC24's structural properties. TCs that
+-- require per-record structure (hash chains, parent links, rejection schema,
+-- record-level timestamps) are more naturally expressed in dedicated segments.
+-- Each segment verifies its own properties independently; the monolith and
+-- segments together form the complete coverage.
+--
+-- Where to find each newer TC:
+--   - fdp_evidence_quality.als: TC24 (F6), TC25 (F7), TC26 (F8), TC27 (F9)
+--       — evidence quality: cross-source absence, write path, numeric exactness,
+--         snapshot temporality
+--   - fdp_skip_protocol.als: TC28 tightened (PV2 + verbatim acknowledgement
+--       + later-turn entry). Three-step propose → acknowledge → writeSkipEntry
+--       protocol with 8 safety assertions.
+--   - fdp_temporal_core.als: TC29 (PW0-init stub layout before Step 0a)
+--   - fdp_structured_chain.als: TC30 (PW0-live) — the four-chain model:
+--       report chain, hypothesis chain, evidence parent links, model chain,
+--       plus state-change EvidenceHash binding.
+--   - fdp_symptom_proximity.als: TC31 (S0-V.1 transport-shaped liveness)
+--   - fdp_baseline_comparability.als: TC32 (F10 baseline match on repo/
+--       trigger/config)
+--   - fdp_intervention_ordering.als: TC34 (OB1 observability before
+--       intervention — "observationTime" field, not per-record Turn)
+--   - fdp_rejection_reasons.als: TC35 (U2-doc rejection with allowed
+--       preference criteria)
+--
+-- TC33 (F11 workspace contamination) is GAP8 — harness-level check only;
+-- enforced by scripts/check_workspace_clean.sh against the working tree,
+-- not expressible as a solver property.

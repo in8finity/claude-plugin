@@ -19,8 +19,8 @@ abstract sig Bool {}
 one sig True, False extends Bool {}
 
 sig Intervention {
-  turn: one Int,
-  priorDirectEvidenceTurn: one Int,
+  observationTime: one Int,
+  priorDirectEvidenceTime: one Int,
   targetStateObservable: one Bool
 }
 
@@ -30,7 +30,7 @@ sig Intervention {
 
 pred interventionValid[i: Intervention] {
   i.targetStateObservable = True
-  i.priorDirectEvidenceTurn < i.turn
+  i.priorDirectEvidenceTime < i.observationTime
 }
 
 pred allInterventionsValid[xs: set Intervention] {
@@ -51,7 +51,7 @@ check OB1_UnobservedInterventionFails for 4 but 4 Int
 -- OB1-S2: Simultaneous evidence and intervention fails (evidence must be BEFORE).
 assert OB1_SimultaneousInterventionFails {
   all i: Intervention |
-    (i.targetStateObservable = True and i.priorDirectEvidenceTurn = i.turn)
+    (i.targetStateObservable = True and i.priorDirectEvidenceTime = i.observationTime)
     => not interventionValid[i]
 }
 check OB1_SimultaneousInterventionFails for 4 but 4 Int
@@ -59,7 +59,7 @@ check OB1_SimultaneousInterventionFails for 4 but 4 Int
 -- OB1-S3: Evidence AFTER intervention fails (the target was changed blind).
 assert OB1_LateEvidenceFails {
   all i: Intervention |
-    (i.targetStateObservable = True and i.priorDirectEvidenceTurn > i.turn)
+    (i.targetStateObservable = True and i.priorDirectEvidenceTime > i.observationTime)
     => not interventionValid[i]
 }
 check OB1_LateEvidenceFails for 4 but 4 Int
@@ -68,7 +68,7 @@ check OB1_LateEvidenceFails for 4 but 4 Int
 -- earlier than the intervention turn) is valid. Safety check, not existence.
 assert OB1_WellFormedIsValid {
   all i: Intervention |
-    (i.targetStateObservable = True and i.priorDirectEvidenceTurn < i.turn)
+    (i.targetStateObservable = True and i.priorDirectEvidenceTime < i.observationTime)
     => interventionValid[i]
 }
 check OB1_WellFormedIsValid for 4 but 4 Int

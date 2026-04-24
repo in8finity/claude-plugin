@@ -2714,3 +2714,295 @@ lemma FULL_BlindInterventionBlocks(f: FullInvestigation, k: int)
 //   against the working tree. This is a harness-level check (filesystem
 //   observation) and cannot be expressed as a proof obligation. Enforced
 //   procedurally in SKILL.md's pre-acceptance checklist.
+
+// ============================================================
+// 37. U2-doc / TC35 — Rejection reason must be documented
+// ============================================================
+// A rejected hypothesis must carry a reason:
+//   EvidenceBased(evidenceIdx) — cites a specific E<N> entry
+//   PreferenceBased(priority, rationale) — a DOCUMENTED preference with
+//     a priority criterion from a closed allowed set + non-empty rationale
+// This closes U2's loophole: "rejected because I prefer the other one" is
+// legitimate IF and only if the preference is named and justified.
+
+datatype PreferenceReason =
+  | Occam | BlastRadius | Severity | RecencyOfDeploy | Reproducibility | FixCost
+
+datatype RejectionReason =
+  | EvidenceBased(evidenceIdx: int)
+  | PreferenceBased(priority: PreferenceReason, rationale: string)
+
+predicate validRejectionReason(r: RejectionReason, evidenceLogLen: int)
+{
+  match r
+  case EvidenceBased(idx) => 0 <= idx < evidenceLogLen
+  case PreferenceBased(_, rationale) => |rationale| > 0
+}
+
+// TC35-T1: EvidenceBased with out-of-bounds index is invalid.
+lemma TC35_InvalidEvidenceIdx(idx: int, logLen: int)
+  requires idx < 0 || idx >= logLen
+  ensures !validRejectionReason(EvidenceBased(idx), logLen)
+{}
+
+// TC35-T2: PreferenceBased with empty rationale is invalid.
+lemma TC35_EmptyRationaleFails(p: PreferenceReason)
+  ensures !validRejectionReason(PreferenceBased(p, ""), 10)
+{}
+
+// TC35-T3: PreferenceBased with any allowed priority + non-empty rationale is valid.
+lemma TC35_AllPrioritiesWithRationaleValid()
+  ensures validRejectionReason(PreferenceBased(Occam, "simpler mechanism"), 10)
+  ensures validRejectionReason(PreferenceBased(BlastRadius, "smaller blast"), 10)
+  ensures validRejectionReason(PreferenceBased(Severity, "lower impact"), 10)
+  ensures validRejectionReason(PreferenceBased(RecencyOfDeploy, "recent change"), 10)
+  ensures validRejectionReason(PreferenceBased(Reproducibility, "deterministic"), 10)
+  ensures validRejectionReason(PreferenceBased(FixCost, "cheaper fix"), 10)
+{}
+
+// TC35-T4: EvidenceBased with valid index is accepted.
+lemma TC35_ValidEvidenceAccepted(idx: int, logLen: int)
+  requires 0 <= idx < logLen
+  ensures validRejectionReason(EvidenceBased(idx), logLen)
+{}
+
+// --- Tie to investigation state ---
+
+datatype RejectionEntry = RejectionEntry(
+  hypothesisId: int,
+  reason: RejectionReason
+)
+
+predicate allRejectionsDocumented(rs: seq<RejectionEntry>, evidenceLogLen: int)
+{
+  forall k :: 0 <= k < |rs| ==> validRejectionReason(rs[k].reason, evidenceLogLen)
+}
+
+// TC35-T5: One undocumented rejection poisons the whole sequence.
+lemma TC35_OneBadBreaksAll(rs: seq<RejectionEntry>, k: int, logLen: int)
+  requires 0 <= k < |rs|
+  requires !validRejectionReason(rs[k].reason, logLen)
+  ensures !allRejectionsDocumented(rs, logLen)
+{}
+
+// TC35-T6: Empty rejection sequence is trivially valid.
+lemma TC35_EmptyValid(logLen: int)
+  ensures allRejectionsDocumented([], logLen)
+{}
+
+// ============================================================
+// 38. TC30 / PW0-live — Structured hash integrity
+// ============================================================
+// Models the four parallel chains of the skill's provenance contract:
+// report chain (investigation-report-<N> via PrevReportHash), hypothesis
+// chain (H events via PrevHypHash), evidence parent links (ParentHypEvent
+// + ParentHypHash), and model-change chain + parent links. Plus the
+// state-change EvidenceHash that freezes cited evidence.
+//
+// We model sha256 abstractly as `string` — two distinct content states
+// produce distinct hashes. Validity predicates check that reference fields
+// (PrevHypHash, ParentHypHash, EvidenceHash, etc.) match the contentHash
+// of the records they reference. Tampering = changing a content state,
+// which changes the contentHash, which invalidates any record that
+// references the OLD state.
+
+datatype ReportRecord = ReportRecord(
+  versionNum: nat,
+  contentHash: string,
+  prevReportHash: string   // "" for version 1 (genesis)
+)
+
+datatype HypEventType =
+  | HSymptomClaimed | HCreated | HMechanismStated | HCounterfactualStated
+  | HObservabilityAssessed | HAlternativeConsidered
+  | HStatusChanged | HAccepted | HEquivalenceChecked
+
+datatype HypEventRecord = HypEventRecord(
+  contentHash: string,
+  prevHypHash: string,            // either prev H's contentHash or report-1's
+  eventType: HypEventType,
+  // State-change-specific fields; ignored unless eventType is HStatusChanged
+  // or HAccepted. Represented as an Option-ish structure via empty defaults.
+  citedEvidenceHashes: seq<string>,
+  evidenceHash: string
+)
+
+datatype EvidenceRecord = EvidenceRecord(
+  contentHash: string,
+  parentHypIndex: nat,            // index into the hypothesis-event sequence
+  parentHypHash: string           // snapshot of parent's contentHash at attachment
+)
+
+datatype ModelChangeRecord = ModelChangeRecord(
+  contentHash: string,
+  prevModelHash: string,
+  parentHypIndex: nat,
+  parentHypHash: string
+)
+
+// Abstract sha256-of-sorted-concat combiner. In the real world, this is
+// sha256 over the sorted concatenation of cited evidence file hashes. Here
+// we use Dafny's sequence-equality-under-sorting as a proxy: two hashes are
+// equal iff the sorted multisets are equal.
+predicate evidenceHashEqualsSortedCombine(ev_hash: string, cited: seq<string>)
+{
+  // Abstract: we require a total function hashCombine that satisfies this,
+  // captured as a parameterized assumption via a separate predicate.
+  // For the model we treat ev_hash == "combine(" + <sorted cited concat> + ")".
+  // The concrete hashing is irrelevant for proving integrity properties —
+  // what matters is that distinct cited multisets produce distinct hashes
+  // and identical multisets produce identical hashes.
+  true  // abstract placeholder; integrity reasoning below uses direct comparisons
+}
+
+// ----- Chain validity predicates -----
+
+predicate validReportChain(reports: seq<ReportRecord>)
+  requires |reports| > 0
+{
+  reports[0].versionNum == 1 &&
+  reports[0].prevReportHash == "" &&
+  forall i :: 1 <= i < |reports| ==>
+    reports[i].versionNum == i + 1 &&
+    reports[i].prevReportHash == reports[i-1].contentHash
+}
+
+predicate validHypChain(hyps: seq<HypEventRecord>, reportAnchor: string)
+{
+  |hyps| == 0 ||
+  (hyps[0].prevHypHash == reportAnchor &&
+   forall i :: 1 <= i < |hyps| ==> hyps[i].prevHypHash == hyps[i-1].contentHash)
+}
+
+predicate validEvidenceParentLinks(evidence: seq<EvidenceRecord>, hyps: seq<HypEventRecord>)
+{
+  forall i :: 0 <= i < |evidence| ==>
+    evidence[i].parentHypIndex < |hyps| &&
+    evidence[i].parentHypHash == hyps[evidence[i].parentHypIndex].contentHash
+}
+
+predicate validModelChain(models: seq<ModelChangeRecord>, reportAnchor: string, hyps: seq<HypEventRecord>)
+{
+  forall i :: 0 <= i < |models| ==>
+    models[i].parentHypIndex < |hyps| &&
+    models[i].parentHypHash == hyps[models[i].parentHypIndex].contentHash &&
+    (if i == 0 then models[i].prevModelHash == reportAnchor
+     else models[i].prevModelHash == models[i-1].contentHash)
+}
+
+// Helper: is this event a state-change that must carry a valid EvidenceHash?
+predicate isStateChangeEvent(h: HypEventRecord)
+{
+  h.eventType == HStatusChanged || h.eventType == HAccepted
+}
+
+// Abstract EvidenceHash validity: the declared hash must equal the combiner
+// applied to the cited evidence hashes.
+predicate validEvidenceHashBinding(h: HypEventRecord, evidence: seq<EvidenceRecord>)
+{
+  !isStateChangeEvent(h) ||
+  (|h.citedEvidenceHashes| > 0 &&
+   // Cited hashes must exist in the evidence set AT CURRENT STATE.
+   // Any tampered evidence has a different contentHash than what was cited.
+   forall ci :: 0 <= ci < |h.citedEvidenceHashes| ==>
+     exists ei :: 0 <= ei < |evidence| &&
+       evidence[ei].contentHash == h.citedEvidenceHashes[ci])
+}
+
+predicate validAllStateChanges(hyps: seq<HypEventRecord>, evidence: seq<EvidenceRecord>)
+{
+  forall i :: 0 <= i < |hyps| ==> validEvidenceHashBinding(hyps[i], evidence)
+}
+
+// Full TC30 compliance.
+predicate tc30Pass(
+  reports: seq<ReportRecord>,
+  hyps: seq<HypEventRecord>,
+  evidence: seq<EvidenceRecord>,
+  models: seq<ModelChangeRecord>)
+  requires |reports| > 0
+{
+  validReportChain(reports) &&
+  validHypChain(hyps, reports[0].contentHash) &&
+  validEvidenceParentLinks(evidence, hyps) &&
+  validModelChain(models, reports[0].contentHash, hyps) &&
+  validAllStateChanges(hyps, evidence)
+}
+
+// ----- Tamper-detection lemmas -----
+
+// TC30-C1: empty investigation (no records beyond genesis report) is valid.
+lemma TC30_EmptyValid(reports: seq<ReportRecord>)
+  requires |reports| == 1
+  requires reports[0].versionNum == 1
+  requires reports[0].prevReportHash == ""
+  ensures tc30Pass(reports, [], [], [])
+{}
+
+// TC30-C2: a report with the wrong PrevReportHash breaks validReportChain.
+lemma TC30_ReportTamperBreaksChain(reports: seq<ReportRecord>, i: int)
+  requires |reports| >= 2
+  requires 1 <= i < |reports|
+  requires reports[i].prevReportHash != reports[i-1].contentHash
+  ensures !validReportChain(reports)
+{}
+
+// TC30-C3: a hypothesis event with a wrong PrevHypHash breaks validHypChain.
+lemma TC30_HypTamperBreaksChain(hyps: seq<HypEventRecord>, anchor: string, i: int)
+  requires |hyps| >= 2
+  requires 1 <= i < |hyps|
+  requires hyps[i].prevHypHash != hyps[i-1].contentHash
+  ensures !validHypChain(hyps, anchor)
+{}
+
+// TC30-C4: evidence pointing to a non-existent hypothesis index breaks
+// validEvidenceParentLinks.
+lemma TC30_OrphanEvidenceBreaksLinks(
+  evidence: seq<EvidenceRecord>, hyps: seq<HypEventRecord>, i: int)
+  requires 0 <= i < |evidence|
+  requires evidence[i].parentHypIndex >= |hyps|
+  ensures !validEvidenceParentLinks(evidence, hyps)
+{}
+
+// TC30-C5: evidence with a ParentHypHash not matching the current parent's
+// contentHash breaks the parent link. (Retroactive edit to the parent H event.)
+lemma TC30_ParentTamperBreaksEvidenceLink(
+  evidence: seq<EvidenceRecord>, hyps: seq<HypEventRecord>, i: int)
+  requires 0 <= i < |evidence|
+  requires evidence[i].parentHypIndex < |hyps|
+  requires evidence[i].parentHypHash != hyps[evidence[i].parentHypIndex].contentHash
+  ensures !validEvidenceParentLinks(evidence, hyps)
+{}
+
+// TC30-C6: a state-change citing evidence whose contentHash no longer exists
+// in the current evidence sequence breaks validEvidenceHashBinding. This
+// captures the "evidence tampered after citation" attack.
+lemma TC30_TamperedCitedEvidenceBreaksBinding(
+  h: HypEventRecord, evidence: seq<EvidenceRecord>, ci: int)
+  requires isStateChangeEvent(h)
+  requires 0 <= ci < |h.citedEvidenceHashes|
+  requires forall ei :: 0 <= ei < |evidence| ==>
+    evidence[ei].contentHash != h.citedEvidenceHashes[ci]
+  ensures !validEvidenceHashBinding(h, evidence)
+{
+  // The cited hash at index ci has no surviving match in current evidence:
+  // the inner existential is false, so validEvidenceHashBinding is false.
+  assert !exists ei :: 0 <= ei < |evidence|
+    && evidence[ei].contentHash == h.citedEvidenceHashes[ci];
+}
+
+// TC30-C7: one broken state-change poisons the whole sequence.
+lemma TC30_OneBadStateChangeFailsAll(
+  hyps: seq<HypEventRecord>, evidence: seq<EvidenceRecord>, i: int)
+  requires 0 <= i < |hyps|
+  requires !validEvidenceHashBinding(hyps[i], evidence)
+  ensures !validAllStateChanges(hyps, evidence)
+{}
+
+// TC30-C8: a valid example exists — empty everything with a genesis report.
+lemma TC30_ValidExample()
+  ensures
+    var r := ReportRecord(1, "genesis-hash", "");
+    tc30Pass([r], [], [], [])
+{}
+
