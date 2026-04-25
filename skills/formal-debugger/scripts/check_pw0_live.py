@@ -56,6 +56,7 @@ EVENT_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}Event\*{0,2}\s*:\s*(\S+)", re.IGN
 EVIDENCE_LIST_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}Evidence\*{0,2}\s*:\s*\[([^\]]*)\]", re.IGNORECASE)
 EVIDENCE_SINGLE_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}Evidence\*{0,2}\s*:\s*(E\d+)", re.IGNORECASE)
 EVIDENCE_HASH_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}EvidenceHash\*{0,2}\s*:\s*([0-9a-fA-F]{64})", re.IGNORECASE)
+SUPERSEDES_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}Supersedes\*{0,2}\s*:\s*(H\d+-\d+)", re.IGNORECASE)
 
 H_FN_RE = re.compile(r"^(H\d+-\d+)_")
 E_FN_RE = re.compile(r"^(E\d+)_")
@@ -114,6 +115,7 @@ def load_records(base):
                 "event": None,
                 "evidence_list": None,
                 "evidence_hash": None,
+                "supersedes": None,
             }
             try:
                 for line in f.read_text().splitlines():
@@ -157,6 +159,11 @@ def load_records(base):
                         g = EVIDENCE_HASH_RE.match(line)
                         if g:
                             rec["evidence_hash"] = g.group(1).lower()
+                            continue
+                    if rec["supersedes"] is None:
+                        g = SUPERSEDES_RE.match(line)
+                        if g:
+                            rec["supersedes"] = g.group(1)
                             continue
             except Exception:
                 pass
@@ -324,9 +331,18 @@ def main():
 
     # --- Check 4: state-change EvidenceHash ---
     ev_by_label = {e["label"]: e for e in recs["evidence"]}
+    # Build the supersession set: any H label that is named in a later H's
+    # Supersedes: field is considered superseded and skipped in the
+    # EvidenceHash check below. This lets repair records replace broken
+    # state-changes without forcing deletion of the originals.
+    superseded_labels = {h["supersedes"] for h in hyps if h.get("supersedes")}
     sc_errors = []
     for h in hyps:
         if h["event"] not in STATE_CHANGE_EVENTS:
+            continue
+        if h["label"] in superseded_labels:
+            # This state-change has been superseded by a later record.
+            # Its broken EvidenceHash is acknowledged historical fact.
             continue
         if h["evidence_list"] is None:
             sc_errors.append((h, f"{h['event']} event missing Evidence: [...] list"))
