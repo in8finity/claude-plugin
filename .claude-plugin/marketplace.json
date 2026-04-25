@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Formal methods skills for modeling and debugging software systems using Alloy 6 and Dafny",
-    "version": "1.2.2",
+    "version": "1.3.0",
     "license": "CC-BY-NC-SA-4.0"
   },
   "plugins": [
@@ -16,7 +16,8 @@
       "source": "./",
       "skills": [
         "./skills/formal-modeling",
-        "./skills/formal-debugger"
+        "./skills/formal-debugger",
+        "./skills/formal-debugger-harness"
       ]
     }
   ]
