@@ -118,43 +118,16 @@ When that happens:
 of this protocol — one MCP call to `get_work_package`, sort by created_at, write the
 four markdown views with the correct headers. Use it instead of hand-rolling.
 
-**What hashharness enforces automatically (was agent discipline in the filesystem variant):**
+Storage is append-only and chain-integrity-checked: items are immutable
+(rewrites with same `text` rejected), `record_sha256` is server-computed,
+links are type-validated at `create_item` time, and the `citedEvidence: many`
+link auto-derives `citedEvidenceHash` from sorted referenced text-hashes.
+`verify_chain(hash)` recomputes everything transitively.
 
-- **Append-only**: existing items are immutable. Calling `create_item` with the same
-  `text` but different `links` or metadata returns `StorageError`. Nothing is ever
-  deleted or rewritten.
-- **Hash chain integrity**: every item's `record_sha256` is computed by the server from
-  `text_sha256 + meta_sha256 + links_sha256`. The agent never computes hashes manually.
-- **Link validation**: a link to an item that doesn't exist (or has the wrong type) is
-  rejected at `create_item` time.
-- **EvidenceHash equivalent**: for the `citedEvidence: many` link, the server stores a
-  derived `citedEvidenceHash` field — sha256 of the sorted evidence-text-hashes. This is
-  the structural equivalent of the old `EvidenceHash:` field but auto-derived.
-- **Chain traversal and verification**: `verify_chain(text_sha256)` walks the full graph
-  reachable from any item through its links and recomputes every hash. Returns `ok: true`
-  iff the graph is consistent.
-
-**Four parallel chains, same as the filesystem variant — but expressed as hashharness links:**
-
-1. **Report chain** — `Report` items chain via `prevReport`. The first report has no
-   `prevReport`; it is the genesis anchor for everything.
-2. **Hypothesis chain** — `HypothesisEvent` items chain via `prevHyp`. The first H event
-   anchors on the genesis Report (cross-type link).
-3. **Evidence parent links** — `Evidence` items attach upward to a `HypothesisEvent` via
-   `parentHypEvent`. Evidence is not chained to other evidence.
-4. **Model-change chain + parent** — `ModelChange` items chain via `prevModel` AND attach
-   to the triggering H event via `parentHypEvent`.
-
-State-change events (a `HypothesisEvent` whose `text` indicates `event=status-changed`
-or `event=accepted`) carry the `citedEvidence: many` link. The auto-derived
-`citedEvidenceHash` is the integrity binding — any later evidence change would produce
-a different hash, but evidence is also immutable so this binding is permanent.
-
-**Symptom-verification anchor.** At Step 0b, after creating Report v1 (the genesis),
-the first thing to create is an H0-1 `HypothesisEvent` with `event=symptom-claimed` and
-`prevHyp` linked to Report v1. Then E1 attaches to H0-1 via `parentHypEvent`. This
-keeps the "evidence must attach to a hypothesis event" rule consistent from the very
-first evidence.
+**Symptom-verification anchor.** At Step 0b, the first H event (H0-1) has
+`event=symptom-claimed` and `prevHyp` linking to Report v1. E1 then
+attaches to H0-1 via `parentHypEvent` — keeps the evidence-must-attach
+rule consistent from the very first evidence.
 
 **Blocking precondition (PW0-init).** Before proceeding to Step 0a, Claude MUST:
 1. Verify the schema is set via `mcp__hashharness__get_schema`. If empty, call
@@ -400,61 +373,19 @@ by name (e.g., "E1, E4, and H2-3 together rule out ...").
 
 ## Proof of work records
 
-Records live as hashharness items addressed by `text_sha256`. PW1: at least one
-`Evidence` item with `direct` reliability. PW2: at least one `ModelChange` item
-if a model is built, re-run after fact integration. PW3: a `HypothesisEvent`
-item for each TC13-18 lifecycle event.
+PW1: ≥1 `Evidence` with `direct` reliability. PW2: ≥1 `ModelChange` if a
+model is built, re-run after fact integration. PW3: a `HypothesisEvent`
+for each TC13-18 lifecycle event. PW0-init is defined in Step 0.
 
-**PW0-init — schema set and Report v1 created.** Before Step 0a begins:
-
-1. Verify schema via `mcp__hashharness__get_schema`. If empty or missing any of the
-   four types (`Report`, `HypothesisEvent`, `Evidence`, `ModelChange`), call
-   `mcp__hashharness__set_schema` with the payload from Step 0.
-2. Choose a `work_package_id` (kebab-case from the symptom).
-3. Create Report v1 via `mcp__hashharness__create_item`:
-   `item_type=Report`, `work_package_id=<chosen>`, `text=<symptom sketch>`,
-   no `links` (no `prevReport` — this is the genesis).
-4. Show the user the returned `text_sha256`.
-
-No evidence collection, code reading, or queries may precede this. PW0-init is
-satisfied by the storage acknowledgement of Report v1's creation.
-
-**PW0-live — append-only hashharness storage with chain integrity.** Most of what
-PW0-live used to demand from the agent (timestamp validity, chain hashes, evidence
-freezing, immutability) is now enforced by the storage layer. What remains:
-
-1. **Use the right item types and links.** Each record is exactly one
-   `mcp__hashharness__create_item` call with the right `item_type` and `links`
-   per the schema. A wrong link kind or unknown target type is rejected by the
-   server.
-2. **Use returned hashes only.** Every link value (in `prevHyp`, `parentHypEvent`,
-   `prevReport`, `prevModel`, `citedEvidence`, `supersedes`) MUST be the
-   `text_sha256` of an item that already exists in storage and was just returned
-   by a prior `create_item` call (or fetched via `find_items` / `query_chain`).
-   Never invent or guess a hash.
-3. **`work_package_id` consistency.** All items in one investigation share the
-   same `work_package_id`. Mixing values in one investigation is a PW0-live
-   violation even if every individual item is well-formed.
-4. **`verify_chain` clean at termination.** Before acceptance, call
-   `mcp__hashharness__verify_chain` on the latest item (or any tip — the chain
-   reaches everything). The result MUST be `ok: true` for every reachable item.
-
-What hashharness gives you for free (no agent discipline required):
-- Append-only / immutability (rewrites with same `text` and different links are
-  rejected with `StorageError`)
-- All four chains (Report, H, E, M) — server validates the link references at
-  `create_item` time
-- `citedEvidenceHash` — automatically derived from the sorted evidence text-hashes
-  inside the `citedEvidence: many` link. The agent never computes this.
-- `record_sha256` integrity — recomputed by `verify_chain`
-
-What is NO LONGER part of the protocol (vs filesystem-mode):
-- Filename timestamp suffixes. Items are named by their content hash.
-- In-record `Timestamp:` field maintained by the agent. Each item has a server-
-  recorded `created_at` instead. Timestamp manipulation is not a vector.
-- `Timestamp:` vs filesystem ctime check. There is no filesystem.
-- Burst detection. Storage immutability + append-only chain validation provides
-  the integrity those checks were trying to approximate.
+**PW0-live — agent obligations (storage handles the rest).**
+1. Use the right `item_type` + `links`; the server rejects wrong kinds at
+   `create_item` time.
+2. Link values are `text_sha256` of items that already exist (returned from a
+   prior `create_item` or fetched via `find_items`/`query_chain`). Never
+   invent a hash.
+3. `work_package_id` is consistent across all items in one investigation.
+4. At termination, `mcp__hashharness__verify_chain` on the latest tip returns
+   `ok: true` for every reachable item.
 
 **PW0-strict — single-create discipline.** The append-only storage closes the
 "delete the broken record" loophole automatically (storage refuses), but the
@@ -569,7 +500,9 @@ so they're tamper-evident the same way the rest of the record is.
   - `text`: what changed in the model, optionally embedded `.als`/`.dfy`
     snippets, observed solver behavior in prose.
   - `links`: `{"prevModel": <prior M hash, or Report v1 for the first M>,
-    "parentHypEvent": <triggering H hash>}`.
+    "parentHypEvent": <triggering H hash>}`. Both links are required —
+    `prevModel` chains model history; `parentHypEvent` attaches the
+    iteration to the hypothesis that triggered it.
 
 The protocol checkers (e.g., `scripts/check_rejection_reasons.py`) read from
 `attributes` directly. Putting structured fields in `attributes` instead of
@@ -581,38 +514,11 @@ before acceptance. Re-verification means creating a NEW Evidence item linked to
 the same parent (or to a fresher hypothesis event if appropriate); the old
 Evidence item stays in storage as the historical observation.
 
-**Pre-acceptance log checklist** (mirrors TC1-36):
-1. Evidence log has `direct` entry (PW1)
-2. Model log has entry if built; re-run after facts (PW2)
-3. `mechanism-stated` logged (H1)
-4. `counterfactual-stated` logged (H2)
-5. `observability-assessed` = observable (FZ2)
-6. Counterfactual verified via `direct` evidence
-7. `equivalence-checked` logged (U1)
-8. `alternative-considered` logged (M2)
-9. One `compatible`/`accepted`, rest `rejected` (U1)
-10. No stale `direct` evidence (F5)
-11. Model Coverage table filled (M1)
-12. First evidence per production-first step is `direct`/`inferred` (TC19)
-13. Reliability tags match source table (F1)
-14. Status transitions follow valid table (no `rejected`→other)
-15. Fix tasks: first S4 = `direct` (F4)
-16. Dynamic data: current value + history + timeline (F3)
-17. Absence: `Absence sources N/M` with N=M (F6)
-18. Wrong values: `write-path` + `Producer identified` (F7)
-19. Numeric: `exact-local` + `Residual ≤5%` (F8)
-20. Snapshot: `Field temporality: live` for current-state (F9)
-21. Model skip: `M1: Skipped (user-acknowledged)` with rationale (TC28/PV2)
-22. Stub files created at Step 0 before any evidence collection (TC29/PW0-init)
-23. No burst writes on the termination turn (TC30/PW0-live)
-24. Transport-shaped symptom: liveness proven before transport investigation (TC31/S0-V.1)
-25. Differential baseline matches on repo/trigger/config (TC32/F10)
-26. Workspace contamination checked when local/CI is involved (TC33/F11)
-27. No intervention before direct evidence of the state changed (TC34/OB1)
-28. Every `rejected` hypothesis has a documented `Reason:` + backing field (TC35/U2-doc)
-29. Single-record write discipline observed (TC36/PW0-strict): one `Write` per record, fresh `Bash` calls for time and predecessor hash, no multi-file write/repair helpers, pre-write narration present
-
-If any fails, iterate.
+Pre-acceptance check: re-read the Step 8 termination conditions (TC1-36)
+and confirm each. `scripts/audit.py <work_package_id>` runs the
+mechanical subset (TC30 chain integrity + TC35 rejection-schema) against
+the live store; the rest are content-level checks the agent must verify
+by inspection.
 
 ---
 
@@ -675,15 +581,9 @@ PrevHash before each Write.
 - `templates/tooling-inventory.md` — Template for tooling inventory. Copy into the project's
   `investigations/` directory and fill in. The skill reads it at Step 0a to avoid
   re-enumerating tools each investigation.
-**MCP tools (replace most of the helper scripts in the filesystem variant):**
 
-- `mcp__hashharness__set_schema` / `get_schema` — schema declaration
-- `mcp__hashharness__create_item` — single record creation (one call per record)
-- `mcp__hashharness__find_items` — search by `text`/`title`/`work_package_id`/`all`
-- `mcp__hashharness__get_item_by_hash` — fetch by `text_sha256`
-- `mcp__hashharness__query_chain` — walk transitively from a tip
-- `mcp__hashharness__verify_chain` — recompute and validate every hash; the TC30
-  acceptance check
+The MCP tools the wrapper scripts use are the same set listed at Step 0;
+no need to repeat them here.
 
 **Token-efficient wrapper scripts.** Direct `mcp__hashharness__create_item`
 calls from the agent are verbose — both the request and response carry the
