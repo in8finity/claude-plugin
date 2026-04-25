@@ -2824,7 +2824,11 @@ datatype HypEventRecord = HypEventRecord(
   // State-change-specific fields; ignored unless eventType is HStatusChanged
   // or HAccepted. Represented as an Option-ish structure via empty defaults.
   citedEvidenceHashes: seq<string>,
-  evidenceHash: string
+  evidenceHash: string,
+  // Supersedes: index of the H record this one replaces, or -1 if none.
+  // A superseded record stays on disk; the validator skips its EvidenceHash
+  // check because the supersedeR carries the fresh hash.
+  supersedesIdx: int
 )
 
 datatype EvidenceRecord = EvidenceRecord(
@@ -2909,9 +2913,24 @@ predicate validEvidenceHashBinding(h: HypEventRecord, evidence: seq<EvidenceReco
        evidence[ei].contentHash == h.citedEvidenceHashes[ci])
 }
 
+// A record is superseded if some later record names it via supersedesIdx.
+predicate isSuperseded(hyps: seq<HypEventRecord>, i: int)
+{
+  exists j :: 0 <= j < |hyps| && hyps[j].supersedesIdx == i
+}
+
+// Supersession is well-formed: a superseder must come AFTER its target
+// (forbids "supersede the future") and the target index must be in range.
+predicate supersessionWellFormed(hyps: seq<HypEventRecord>)
+{
+  forall i :: 0 <= i < |hyps| && hyps[i].supersedesIdx >= 0 ==>
+    0 <= hyps[i].supersedesIdx < i
+}
+
 predicate validAllStateChanges(hyps: seq<HypEventRecord>, evidence: seq<EvidenceRecord>)
 {
-  forall i :: 0 <= i < |hyps| ==> validEvidenceHashBinding(hyps[i], evidence)
+  forall i :: 0 <= i < |hyps| ==>
+    isSuperseded(hyps, i) || validEvidenceHashBinding(hyps[i], evidence)
 }
 
 // Full TC30 compliance.
@@ -2926,7 +2945,8 @@ predicate tc30Pass(
   validHypChain(hyps, reports[0].contentHash) &&
   validEvidenceParentLinks(evidence, hyps) &&
   validModelChain(models, reports[0].contentHash, hyps) &&
-  validAllStateChanges(hyps, evidence)
+  validAllStateChanges(hyps, evidence) &&
+  supersessionWellFormed(hyps)
 }
 
 // ----- Tamper-detection lemmas -----
@@ -2985,17 +3005,23 @@ lemma TC30_TamperedCitedEvidenceBreaksBinding(
     evidence[ei].contentHash != h.citedEvidenceHashes[ci]
   ensures !validEvidenceHashBinding(h, evidence)
 {
-  // The cited hash at index ci has no surviving match in current evidence:
-  // the inner existential is false, so validEvidenceHashBinding is false.
+  // No surviving match at index ci → inner existential is false → inner
+  // forall (ranged over all cited indices) is false → the rhs of
+  // validEvidenceHashBinding (under isStateChangeEvent) is false.
   assert !exists ei :: 0 <= ei < |evidence|
     && evidence[ei].contentHash == h.citedEvidenceHashes[ci];
+  assert !(forall cj :: 0 <= cj < |h.citedEvidenceHashes| ==>
+    exists ei :: 0 <= ei < |evidence| &&
+      evidence[ei].contentHash == h.citedEvidenceHashes[cj]);
 }
 
-// TC30-C7: one broken state-change poisons the whole sequence.
+// TC30-C7: one broken state-change poisons the whole sequence — provided
+// the broken record has not been superseded by a later record.
 lemma TC30_OneBadStateChangeFailsAll(
   hyps: seq<HypEventRecord>, evidence: seq<EvidenceRecord>, i: int)
   requires 0 <= i < |hyps|
   requires !validEvidenceHashBinding(hyps[i], evidence)
+  requires !isSuperseded(hyps, i)
   ensures !validAllStateChanges(hyps, evidence)
 {}
 
@@ -3004,5 +3030,35 @@ lemma TC30_ValidExample()
   ensures
     var r := ReportRecord(1, "genesis-hash", "");
     tc30Pass([r], [], [], [])
+{}
+
+// TC30-C9: a superseded record's broken EvidenceHash does NOT fail
+// validAllStateChanges — the supersedeR carries the fresh hash.
+lemma TC30_SupersededRecordIgnoredInBinding(
+  hyps: seq<HypEventRecord>, evidence: seq<EvidenceRecord>, i: int)
+  requires 0 <= i < |hyps|
+  requires isSuperseded(hyps, i)
+  // Even if hyps[i] has a broken EvidenceHash binding...
+  requires !validEvidenceHashBinding(hyps[i], evidence)
+  // ...validAllStateChanges can still hold IF every other record is valid:
+  requires forall j :: 0 <= j < |hyps| && j != i ==>
+    isSuperseded(hyps, j) || validEvidenceHashBinding(hyps[j], evidence)
+  ensures validAllStateChanges(hyps, evidence)
+{}
+
+// TC30-C10: forward-supersession (supersede a future record) breaks
+// supersessionWellFormed.
+lemma TC30_ForwardSupersessionFails(hyps: seq<HypEventRecord>, i: int)
+  requires 0 <= i < |hyps|
+  requires hyps[i].supersedesIdx >= i  // pointing forward or to self
+  ensures !supersessionWellFormed(hyps)
+{}
+
+// TC30-C11: superseding a non-existent record (out-of-range index) breaks
+// supersessionWellFormed.
+lemma TC30_OutOfRangeSupersessionFails(hyps: seq<HypEventRecord>, i: int)
+  requires 0 <= i < |hyps|
+  requires hyps[i].supersedesIdx >= |hyps|
+  ensures !supersessionWellFormed(hyps)
 {}
 

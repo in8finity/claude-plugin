@@ -63,8 +63,14 @@ sig ModelChange extends Record {
 -- State-change events are a distinguished subset of HypothesisEvent.
 sig StateChangeEvent in HypothesisEvent {
   citedEvidence: some Evidence,
-  evidenceHash: one Hash  -- the EvidenceHash field this event declares
+  evidenceHash: one Hash,  -- the EvidenceHash field this event declares
+  supersedes: lone HypothesisEvent  -- if present, this state-change replaces a prior broken one
 } { eventType in StatusChanged + Accepted }
+
+-- A HypothesisEvent is superseded if some StateChangeEvent names it via supersedes.
+pred isSuperseded[h: HypothesisEvent] {
+  h in StateChangeEvent.supersedes
+}
 
 -- One singleton representing the genesis report (version 1).
 one sig GenesisReport in Report {} { versionNum = 1 and no prevReportRef }
@@ -137,20 +143,34 @@ pred modelParentLinksValid {
 -- EvidenceHash on a state-change event captures the hashes of cited evidence
 -- at citation time. We model this by requiring: the state-change's
 -- evidenceHash is a one-to-one function over the set of contentHash values
--- of its citedEvidence. (In the real implementation it's sha256 of the
--- sorted concatenation of those hashes; in Alloy we abstract that as a
--- unique representative Hash for each distinct set.)
+-- of its citedEvidence. Superseded state-changes are skipped — their
+-- broken hashes are acknowledged historical fact.
 pred evidenceHashValid {
   all disj sc1, sc2: StateChangeEvent |
-    sc1.citedEvidence.contentHash != sc2.citedEvidence.contentHash
+    (not isSuperseded[sc1] and not isSuperseded[sc2]
+     and sc1.citedEvidence.contentHash != sc2.citedEvidence.contentHash)
     => sc1.evidenceHash != sc2.evidenceHash
-  -- Two state-changes citing identical evidence sets get identical hashes:
   all disj sc1, sc2: StateChangeEvent |
-    sc1.citedEvidence.contentHash = sc2.citedEvidence.contentHash
+    (not isSuperseded[sc1] and not isSuperseded[sc2]
+     and sc1.citedEvidence.contentHash = sc2.citedEvidence.contentHash)
     => sc1.evidenceHash = sc2.evidenceHash
 }
 
--- Full TC30 compliance: all four checks pass.
+-- Supersession well-formedness: a superseder must come AFTER its target in
+-- the hypothesis chain (i.e., the target is reachable via the prevHypRef
+-- chain from the superseder). This forbids "supersede the future."
+pred supersessionWellFormed {
+  all sc: StateChangeEvent | some sc.supersedes
+    => sc.supersedes in sc.^prevHypRef
+}
+
+-- Supersession is non-circular: a record can only be superseded once, and
+-- chains of supersession terminate.
+pred supersessionAcyclic {
+  no sc: StateChangeEvent | sc in sc.^supersedes
+}
+
+-- Full TC30 compliance: all six checks pass.
 pred tc30_pass {
   reportChainValid
   hypChainValid
@@ -158,6 +178,8 @@ pred tc30_pass {
   modelChainValid
   modelParentLinksValid
   evidenceHashValid
+  supersessionWellFormed
+  supersessionAcyclic
 }
 
 -- ============================================================
@@ -180,12 +202,15 @@ assert EvidenceParentTamperBreaksLink {
 }
 check EvidenceParentTamperBreaksLink for 5
 
--- TC30-S3: If two state-change events cite evidence sets with different
--- content-hashes but declare the same EvidenceHash, evidenceHashValid fails.
--- (Evidence tampering changes the hash set, breaking the citation.)
+-- TC30-S3: If two NON-SUPERSEDED state-change events cite evidence sets with
+-- different content-hashes but declare the same EvidenceHash, evidenceHashValid
+-- fails. (Evidence tampering changes the hash set, breaking the citation.)
+-- Superseded records are excluded — their broken hashes are acknowledged
+-- historical fact, not a check failure.
 assert EvidenceTamperBreaksHash {
   all disj sc1, sc2: StateChangeEvent |
-    (sc1.citedEvidence.contentHash != sc2.citedEvidence.contentHash
+    (not isSuperseded[sc1] and not isSuperseded[sc2]
+     and sc1.citedEvidence.contentHash != sc2.citedEvidence.contentHash
      and sc1.evidenceHash = sc2.evidenceHash)
     => not evidenceHashValid
 }
@@ -204,15 +229,40 @@ assert AllModelsReachGenesis {
 }
 check AllModelsReachGenesis for 5
 
--- TC30-S6: TC30 compliance is equivalent to the conjunction of the six
+-- TC30-S6: TC30 compliance is equivalent to the conjunction of the eight
 -- sub-checks. This is tautological but documents the decomposition.
 assert TC30Decomposition {
   tc30_pass iff (
     reportChainValid and hypChainValid and evidenceParentLinksValid
     and modelChainValid and modelParentLinksValid and evidenceHashValid
+    and supersessionWellFormed and supersessionAcyclic
   )
 }
 check TC30Decomposition for 5
+
+-- TC30-S7: A superseded state-change with a broken EvidenceHash does NOT
+-- invalidate evidenceHashValid — that's the whole point of supersession.
+-- (Stated as a witness scenario: there exists a model where one state-change
+-- is superseded with a wrong hash AND evidenceHashValid still holds.)
+run SupersededRecordCanHaveBrokenHash {
+  some sc1, sc2: StateChangeEvent |
+    sc1 != sc2
+    and sc1 in sc2.supersedes  -- sc1 is superseded by sc2
+    and sc1.evidenceHash != sc2.evidenceHash  -- different hashes
+    and tc30_pass  -- yet the model still passes TC30
+} for 6
+
+-- TC30-S8: Forward-supersession (supersede a future record) breaks the
+-- well-formedness check. Restated: when supersessionWellFormed holds, no
+-- forward supersession can exist. Without the precondition, forward
+-- supersession is structurally possible — the predicate is what rules it
+-- out. This assertion documents that relationship.
+assert TC30_NoForwardSupersession {
+  supersessionWellFormed =>
+    (all sc: StateChangeEvent | some sc.supersedes
+       => sc.supersedes in sc.^prevHypRef)
+}
+check TC30_NoForwardSupersession for 5
 
 -- ============================================================
 -- Liveness scenarios
