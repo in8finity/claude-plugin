@@ -145,6 +145,14 @@ pred modelParentLinksValid {
 -- evidenceHash is a one-to-one function over the set of contentHash values
 -- of its citedEvidence. Superseded state-changes are skipped — their
 -- broken hashes are acknowledged historical fact.
+--
+-- Note on filesystem provenance (TC30 Check 5): the runtime checker
+-- (scripts/check_pw0_live.py) also validates that each record's in-field
+-- Timestamp matches its filesystem ctime within 60 seconds. That check is
+-- IO-side and not expressed here (the Alloy model has no notion of
+-- filesystem state). The principle "superseded records are excused from
+-- per-record validity checks" extends symmetrically to that runtime check
+-- — same exclusion logic, same audit-trail rationale.
 pred evidenceHashValid {
   all disj sc1, sc2: StateChangeEvent |
     (not isSuperseded[sc1] and not isSuperseded[sc2]

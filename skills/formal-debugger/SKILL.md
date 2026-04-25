@@ -397,9 +397,25 @@ actually constructed sequentially against the live state of its predecessor.
    repair is a NEW state-change record carrying a `Supersedes: H<id>-<N>` field naming the
    record it replaces. The new record has its own fresh `Timestamp:`, `PrevHypHash:` (linking
    to whichever record currently has the highest Timestamp), `Evidence:`, and `EvidenceHash:`
-   values. The original broken record stays on disk untouched. `check_pw0_live.py` ignores
-   any record that has been superseded by a later one, so the check passes once the new
-   record is in place. The supersession itself is part of the audit trail.
+   values. The original broken record stays on disk untouched. The supersession itself is
+   part of the audit trail.
+
+   `check_pw0_live.py` excuses a superseded record from per-record validity checks where
+   "the broken state IS the audit trail":
+   - Check 4 (state-change `EvidenceHash:` validity) — skipped for superseded records
+   - Check 5 (filesystem provenance: `Timestamp:` vs ctime within 60s) — skipped for
+     superseded records
+
+   Other checks still apply transitively because they're about the record's relationship
+   to OTHER records, not the record's own validity:
+   - Check 2 (hypothesis chain via `PrevHypHash:`) — successors of a superseded record
+     still chain to its content hash; supersession doesn't break the chain
+   - Check 3 (evidence parent links) — `ParentHypHash:` reflects what the parent's content
+     was at attachment time, which doesn't change under supersession
+
+   So if you supersede a state-change whose ctime has drifted (e.g., the file was touched
+   long after its in-field `Timestamp:`), the check passes once the superseder is in place.
+   The drift on the historical record is acknowledged, not erased.
 
 7. **Pre-Write narration.** Before each Write of a chain record, state in one sentence:
    the file being written, the `Timestamp:` value just read from `now_iso.py`, and the

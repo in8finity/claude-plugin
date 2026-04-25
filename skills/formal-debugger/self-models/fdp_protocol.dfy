@@ -2805,6 +2805,17 @@ lemma TC35_EmptyValid(logLen: int)
 // of the records they reference. Tampering = changing a content state,
 // which changes the contentHash, which invalidates any record that
 // references the OLD state.
+//
+// Note on filesystem provenance (TC30 Check 5): the runtime checker
+// (scripts/check_pw0_live.py) also validates that each record's in-field
+// Timestamp matches its filesystem ctime within 60 seconds. That check is
+// IO-side and not expressed here (the Dafny model has no notion of
+// filesystem state). The principle "superseded records are excused from
+// per-record validity checks" extends symmetrically to that runtime check
+// — same exclusion logic, same audit-trail rationale. The lemmas below
+// (TC30-C9 SupersededRecordIgnoredInBinding) capture this principle for
+// the structural EvidenceHash binding; the analogous behavior for the
+// runtime fs-provenance check is enforced by check_pw0_live.py directly.
 
 datatype ReportRecord = ReportRecord(
   versionNum: nat,

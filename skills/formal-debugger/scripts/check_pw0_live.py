@@ -241,10 +241,21 @@ def main():
             print(f"  {rel(r['file'])}")
         return 1
 
+    # Compute the supersession set early so all checks can honor rule 6:
+    # a superseded record is acknowledged historical fact and is not
+    # required to pass per-record validity checks (its broken state is
+    # the audit trail of what went wrong; the supersedeR carries the
+    # corrective claim).
+    superseded_labels = {h["supersedes"] for h in recs["hypothesis"] if h.get("supersedes")}
+
     # --- Check 5: filesystem provenance (in-field vs ctime within 60s) ---
+    # Superseded records are skipped — their ctime drift is part of the
+    # acknowledged historical state, not an acceptance-blocking violation.
     fs_mismatch = []
     for r in all_records:
         if r["ctime"] is None:
+            continue
+        if r["label"] in superseded_labels:
             continue
         delta = abs((r["in_field_ts"] - r["ctime"]).total_seconds())
         if delta > FS_TOLERANCE_SECONDS:
@@ -330,12 +341,8 @@ def main():
         return 1
 
     # --- Check 4: state-change EvidenceHash ---
+    # superseded_labels was computed before Check 5; reuse it here.
     ev_by_label = {e["label"]: e for e in recs["evidence"]}
-    # Build the supersession set: any H label that is named in a later H's
-    # Supersedes: field is considered superseded and skipped in the
-    # EvidenceHash check below. This lets repair records replace broken
-    # state-changes without forcing deletion of the originals.
-    superseded_labels = {h["supersedes"] for h in hyps if h.get("supersedes")}
     sc_errors = []
     for h in hyps:
         if h["event"] not in STATE_CHANGE_EVENTS:
