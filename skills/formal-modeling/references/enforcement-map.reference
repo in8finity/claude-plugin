@@ -1,0 +1,153 @@
+# Enforcement Map — `enforcement.yaml`
+
+The enforcement map is the **mechanical counterpart** to the prose enforcement
+report from SKILL.md step 10b. It maps each verified property to the evidence
+that proves the property is enforced — assertion names in the model, call sites
+and exit codes in the code, phrases in the spec/skill text, and test names that
+exercise it.
+
+`check_enforcement.py` walks the YAML and fails CI if any claimed evidence is
+missing. The prose report describes the audit; this artifact proves it.
+
+## Why this artifact exists
+
+Prose enforcement reports drift. A reviewer (or LLM) writes "this property is
+enforced at `executing.py`, `report.py`, `finished.py`, and `heartbeat.py`" —
+and a year later three of those files still enforce it but `heartbeat.py` quietly
+lost the check during a refactor. The model still passes. The report still says
+"enforced." The system has a hole.
+
+The YAML closes that gap by being **executable**: every claim it makes is checked
+on every commit. A drifted gate becomes a CI failure, not a documentation lie.
+
+## Where to put it
+
+Default location: **`./system-models/reports/enforcement.yaml`** (alongside the
+prose `*-enforcement.md` reports, since the YAML is the input the prose report
+is rendered from).
+
+Run from the project root:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/scripts/verify.sh \
+  --check-enforcement system-models/reports/enforcement.yaml
+```
+
+Add `--check-coverage` to also flag any model `check Foo` that has no
+enforcement entry — this catches "the model proves X but no one ever wrote down
+how X is enforced."
+
+## Schema
+
+A YAML file with a top-level `properties:` list, plus optional `tests_glob:`.
+Each property entry has the shape below; all sections are optional, but a
+property needs at least one gate to be useful.
+
+```yaml
+# system-models/reports/enforcement.yaml
+tests_glob: tests/**/test_*.py    # optional, default shown
+
+properties:
+  - id: sticky_chain_coherence    # short stable identifier
+    description: Sticky-bound tasks reject operations from the wrong context_id
+    models:
+      - file: planning.als
+        asserts: [StickyChainCoherence, StickyBindingOnlyAtClaim]
+      - file: planning_sticky_rebinding.als
+        asserts: [SR1, SR2, SR3, SR4, SR5]
+    code_gates:
+      - {file: skills/pm/scripts/executing.py, must_call: store.check_sticky_eligibility, must_exit: 10}
+      - {file: skills/pm/scripts/report.py,    must_call: store.check_sticky_eligibility, must_exit: 10}
+      - {file: skills/pm/scripts/finished.py,  must_call: store.check_sticky_eligibility, must_exit: 10}
+      - {file: skills/pm/scripts/heartbeat.py, must_call: store.check_sticky_eligibility, must_exit: 10}
+    skill_texts:
+      - file: skills/pm/executing/SKILL.md
+        must_mention: ["sticky", "exit 10"]
+    tests: [G8, G46s, G47, G48]
+```
+
+### Field semantics
+
+| Field | Check |
+|---|---|
+| `id` | Free-form short identifier. Used in output; should be stable. |
+| `description` | Human-readable summary. Shown in the report. |
+| `models[].file` | Path to a `.als` or `.dfy` file (relative to project root). |
+| `models[].asserts` | For `.als`: each name must appear as `assert <name>` AND have a paired `check <name>`. For `.dfy`: each must appear as `lemma <name>` or `method <name>`. |
+| `code_gates[].file` | Path to source file (relative to project root). |
+| `code_gates[].must_call` | A function/method the file must call. Python files use AST (matches dotted names like `store.check_sticky_eligibility` and bare-name imports). Other languages use a regex fallback (`<tail>(`) and emit a `(regex fallback — non-Python)` note. |
+| `code_gates[].must_exit` | An integer exit code the file must produce via `return N`, `sys.exit(N)`, `exit(N)`, or `raise SystemExit(N)`. |
+| `skill_texts[].file` | Path to a markdown / spec / instruction file. |
+| `skill_texts[].must_mention` | List of phrases (case-insensitive substring). All must appear. |
+| `tests` | List of test names. Searched as `def [test_]<name>\b` across files matching `tests_glob`. |
+
+### Pass/fail rule
+
+A property passes only when **every** gate listed under it passes. Each failed
+gate produces a separate red row in the output with a brief diagnostic. The
+checker exits 0 if every property passes, 1 if any property fails.
+
+## Output
+
+Default text mode prints a per-property table:
+
+```
+======================================================================
+ Enforcement audit — 2/3 properties pass
+======================================================================
+
+✓ idempotent_finalize — finalize is idempotent
+  ✓ planning.als: assert IdempotentFinalize
+  ✓ scripts/finished.py: calls store.mark_done
+  ✓ scripts/finished.py: exits with 0
+  ✓ tests: def idempotent_finalize_twice
+
+✗ sticky_chain_coherence — Sticky-bound tasks reject wrong context_id
+  ✓ planning.als: assert StickyChainCoherence
+  ✓ scripts/executing.py: calls store.check_sticky_eligibility
+  ✓ scripts/report.py: calls store.check_sticky_eligibility
+  ✗ scripts/heartbeat.py: calls store.check_sticky_eligibility  (no matching call expression)
+  ✓ scripts/finished.py: calls store.check_sticky_eligibility
+
+FAIL — 1 property failed
+```
+
+`--format json` emits the same data as a structured object suitable for CI
+scrapers or dashboards. Each property has `id`, `description`, `ok`, and a
+`gates[]` list of `{label, ok, detail}`.
+
+## Authoring guidance
+
+**Build the entry alongside the model, not after.** When you add a `check Foo`
+to a `.als` file because the user cares about property X, immediately add the
+matching `enforcement.yaml` entry — even if you only know one of the gates yet.
+The empty fields are honest: "we proved X, we don't yet know where it's
+enforced." That signal is more useful than a polished prose report written
+months later from grep output.
+
+**One entry per property, not per gate.** A property enforced at four sites is
+one entry with four `code_gates` rows, not four entries. The id should describe
+the *thing being protected*, not the protection mechanism.
+
+**Use `tests` even if the test isn't great.** A weak test that exercises the
+gate is still an early warning if the gate disappears. The checker doesn't
+evaluate test quality — only presence.
+
+**Don't use `must_mention` as a substitute for `must_call`.** A skill text that
+says "the system rejects X" is a *claim*, not a *check*. If the rejection is
+implemented in code, mark the code gate; reserve `skill_texts` for protocols
+where the text *is* the enforcement (LLM checklists, human runbooks).
+
+## What this still won't catch
+
+- **Wrong predicate in the model.** If `assert Foo` proves the wrong thing, the
+  checker can't help — it only verifies that the named assertion exists.
+- **Wrong call target.** If the gate calls `store.check_sticky_eligibility`
+  but that function is a stub returning `True`, the checker passes. The
+  model + tests catch this; the enforcement map only proves wiring.
+- **Non-protocol issues.** Friction, ergonomics, defaults, integration shape —
+  all outside what formal modeling addresses, and outside what this checker
+  addresses.
+
+The map closes the "claim doesn't match implementation wiring" class.
+Everything else stays the responsibility of the model, the tests, and review.

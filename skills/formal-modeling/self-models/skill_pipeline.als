@@ -197,6 +197,14 @@ one sig Reconciliation  extends Artifact {} { mutable = Yes }  -- discrepancy re
 one sig ReconciliationRpt extends Artifact {} { mutable = Yes }  -- {domain}-reconciliation.md
 one sig EnforcementRpt    extends Artifact {} { mutable = Yes }  -- {domain}-enforcement.md
 
+-- Enforcement-map artifacts (step 10b-B mechanical audit for code sources)
+-- The YAML map authored alongside the model; the bundled checker script;
+-- the schema reference doc. All persist across runs; the YAML grows during
+-- discovery (see SKILL.md step 10b-B "Map is open-ended").
+one sig EnforcementMap          extends Artifact {} { mutable = Yes }  -- system-models/reports/enforcement.yaml
+one sig EnforcementChecker      extends Artifact {} { mutable = No }   -- scripts/check_enforcement.py
+one sig EnforcementMapReference extends Artifact {} { mutable = No }   -- references/enforcement-map.reference
+
 
 -- ================================================================
 -- RECONCILIATION OUTCOMES
@@ -687,6 +695,8 @@ one sig S8_FormatOutput   extends Step {}
 one sig S9_Interpret      extends Step {}
 one sig S9b_Reconcile     extends Step {}  -- reconcile text/code/spec against model assertions
 one sig S10b_EnforcementAudit extends Step {} -- verify Enforced rules have auditable inputs
+one sig S10b_A_GateArtifactCheck extends Step {} -- verify gate audit chains for Enforced verdicts (NL sources)
+one sig S10b_B_EnforcementMap    extends Step {} -- mechanical audit of enforcement.yaml (code sources)
 one sig S10_Iterate       extends Step {}
 
 
@@ -708,7 +718,9 @@ fact StepOrder {
   next[S8_FormatOutput]   = S9_Interpret
   next[S9_Interpret]      = S9b_Reconcile
   next[S9b_Reconcile]     = S10b_EnforcementAudit
-  next[S10b_EnforcementAudit] = S10_Iterate
+  next[S10b_EnforcementAudit] = S10b_A_GateArtifactCheck
+  next[S10b_A_GateArtifactCheck] = S10b_B_EnforcementMap
+  next[S10b_B_EnforcementMap] = S10_Iterate
 }
 
 
@@ -756,6 +768,14 @@ fact Productions {
   -- Persisted reports (written to disk at the end of their respective steps)
   ReconciliationRpt.producedBy = S9b_Reconcile
   EnforcementRpt.producedBy    = S10b_EnforcementAudit
+
+  -- Enforcement-map artifacts
+  -- The YAML is authored alongside the model (S5_WriteModel) and grows during S10b_B
+  -- (the discovery loop in SKILL.md step 10b-B). mutable = Yes captures the extension.
+  EnforcementMap.producedBy           = S5_WriteModel
+  -- Tooling/reference artifacts pre-exist at trigger time, like RunScript and PatternsMd
+  EnforcementChecker.producedBy       = S1_Trigger
+  EnforcementMapReference.producedBy  = S1_Trigger
 }
 
 
@@ -813,6 +833,16 @@ fact Dependencies {
   -- S10b: enforcement audit — requires reconciliation results + source nature
   -- Only meaningful for natural-language sources; skipped for executable code
   S10b_EnforcementAudit.requires = Reconciliation + ReconciliationRpt + UserModel + IncludedSources
+
+  -- S10b-A: gate artifact check — for each Enforced verdict (NL sources), trace the audit chain.
+  -- Requires the enforcement report (which lists Enforced verdicts) and the source it was derived from.
+  S10b_A_GateArtifactCheck.requires = EnforcementRpt + Reconciliation + IncludedSources
+
+  -- S10b-B: enforcement map (mechanical audit for code sources).
+  -- Walks the YAML map, runs the bundled checker, scans for new gates per the discovery loop.
+  -- For NL sources this step's requires are still satisfied (artifacts exist) but discovery
+  -- is structurally a no-op (the prose audit already covered the surface).
+  S10b_B_EnforcementMap.requires = EnforcementMap + EnforcementChecker + EnforcementMapReference + UserModel + IncludedSources
 
   -- S10: iterate — fix model or text based on reconciliation + enforcement
   S10_Iterate.requires = Reconciliation + EnforcementRpt + Interpretation + UserModel + PatternsMd
@@ -1389,6 +1419,40 @@ assert IterationNotALoop {
   S10_Iterate = last
 }
 
+-- ================================================================
+-- ENFORCEMENT MAP (Step 10b-B) — added by reconciliation loop
+-- ================================================================
+
+-- A62: The enforcement map is mutable (grows during the discovery loop)
+--      and is authored alongside the model (S5_WriteModel), per SKILL.md
+--      step 10b-B "build the entry alongside the model, not after."
+assert EnforcementMapAuthoredWithModel {
+  EnforcementMap.mutable = Yes
+  and EnforcementMap.producedBy = S5_WriteModel
+}
+
+-- A63: For code sources, S10b_B replaces the prose enforcement audit
+--      with a mechanical check against enforcement.yaml. The map and
+--      the checker script are both required inputs.
+assert EnforcementMapDrivenAudit {
+  EnforcementMap     in S10b_B_EnforcementMap.requires
+  and EnforcementChecker in S10b_B_EnforcementMap.requires
+}
+
+-- A64: The gate artifact check (10b-A) needs the enforcement report
+--      to know which verdicts are Enforced (only those need a chain).
+assert GateArtifactCheckRequiresEnforcementRpt {
+  EnforcementRpt in S10b_A_GateArtifactCheck.requires
+}
+
+-- A65: Step ordering — enforcement audit family runs in sequence before iterate
+--      (10b prose audit → 10b-A gate chain → 10b-B mechanical map → 10 iterate).
+assert EnforcementChainOrdering {
+  lt[S10b_EnforcementAudit, S10b_A_GateArtifactCheck]
+  and lt[S10b_A_GateArtifactCheck, S10b_B_EnforcementMap]
+  and lt[S10b_B_EnforcementMap, S10_Iterate]
+}
+
 
 -- ================================================================
 -- 11. CHECKS
@@ -1458,14 +1522,21 @@ check GateAuditRequiredForEnforced for 3 but 5 PatternCoverage, 5 ExampleRelevan
 check GateAuditChainComplete    for 3 but 5 PatternCoverage, 5 ExampleRelevance, 4 ProofOfWork, 6 ArtifactVersion
 check ReportsStaleAfterIterate  for 3 but 5 PatternCoverage, 5 ExampleRelevance, 4 ProofOfWork, 6 ArtifactVersion
 
+-- Enforcement-map checks (added by reconciliation loop)
+check EnforcementMapAuthoredWithModel       for 3 but 5 PatternCoverage, 5 ExampleRelevance, 4 ProofOfWork, 6 ArtifactVersion
+check EnforcementMapDrivenAudit              for 3 but 5 PatternCoverage, 5 ExampleRelevance, 4 ProofOfWork, 6 ArtifactVersion
+check GateArtifactCheckRequiresEnforcementRpt for 3 but 5 PatternCoverage, 5 ExampleRelevance, 4 ProofOfWork, 6 ArtifactVersion
+check EnforcementChainOrdering               for 3 but 5 PatternCoverage, 5 ExampleRelevance, 4 ProofOfWork, 6 ArtifactVersion
+
 
 -- ================================================================
 -- 12. SCENARIO RUNS
 -- ================================================================
 
 -- S1: Happy path — all steps execute in order, all dependencies met
+-- Step count: 14 original + S10b_A_GateArtifactCheck + S10b_B_EnforcementMap = 16
 run HappyPath {
-  #Step = 14
+  #Step = 16
   all s: Step, a: s.requires | lte[a.producedBy, s]
 } for 3 but 5 PatternCoverage, 5 ExampleRelevance, 4 ProofOfWork, 6 ArtifactVersion, 6 Int
 

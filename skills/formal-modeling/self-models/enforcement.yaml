@@ -1,0 +1,249 @@
+# Self-enforcement map for the formal-modeling skill.
+#
+# The formal-modeling skill is LLM-executed: most enforcement lives in
+# SKILL.md prose, not in a script's call graph. So entries here use
+# `models` (the assertion that proves the property) + `skill_texts`
+# (the prose that documents/enforces it for the LLM-executor).
+#
+# Run:
+#   bash scripts/verify.sh --check-enforcement \
+#     self-models/enforcement.yaml --check-coverage
+
+properties:
+  - id: tooling_uses_one_runtime
+    description: verify.sh routes each model to exactly one runtime (Alloy or Dafny, never both)
+    models:
+      - file: skill_pipeline.als
+        asserts: [ToolingUsesExactlyOneRuntime]
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "alloy_run.sh"
+          - "dafny_run.sh"
+          - "MANDATORY"
+
+  - id: review_before_run
+    description: Boundary review (step 8 quality gate) must precede running the model
+    models:
+      - file: skill_pipeline.als
+        asserts: [ReviewBeforeRun, ReviewRequiresModel]
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "boundary review"
+          - "quality gate"
+          - "step 8"
+
+  - id: output_includes_checks
+    description: Formatted output must include check results (proof of work for verification steps)
+    models:
+      - file: skill_pipeline.als
+        asserts: [OutputIncludesChecks]
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "proof of work"
+          - "check command"
+
+  - id: minimum_quality_both_modes
+    description: Every model meets the minimum quality bar (facts + asserts + runs) in both guided and free modes; guided mode requires more (module decl + doc comment); the boundary-review quality gate inspects the written model against the actual source system; boundary review produces explicit proof-of-work
+    models:
+      - file: skill_pipeline_quality.als
+        asserts: [BothModesMeetQuality, FreeModeIsValid, GuidedModeHigherQuality]
+      - file: skill_pipeline.als
+        asserts:
+          - BoundaryReviewHasProofOfWork       # A19: S5b must produce ProofOfWork
+          - QualityGateAtBoundaryReview        # A38: S5b requires UserModel + SourceSystem
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "quality gate"
+          - "facts"
+          - "assertions"
+          - "module"                           # Guided mode mandates module declaration
+          - "doc comment"                      # Guided mode mandates doc comment
+
+  - id: source_aware_modeling
+    description: Writing a model requires the actual source system (code + spec + tests + docs), with Code always included; the runtime is selected explicitly (local Java or Docker fallback) rather than left ambiguous
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - ModelRequiresSourceSystem          # A28: S5 requires SourceSystem
+          - ModelRequiresCode                  # A48: S5 requires SourceCode
+          - RuntimeChoiceResolved              # A54: S6 requires RunScript and one of Java/Docker
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "actual system"                    # boundary-review prompt to user (line 364)
+          - "Code (always included)"           # source-selection convention (line 366)
+          - "local Java"                       # runtime-choice option
+          - "Docker"                           # runtime-choice option
+
+  - id: conflict_outcome
+    description: When sources contradict each other (Conflict verdict), the reconciliation cannot proceed automatically — the user must choose direction; a Conflict on its own does not trigger a model re-run (no FixModel direction is set yet)
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - ConflictRequiresUserDecision       # A53: Conflict outcome → direction = UserDecides
+          - ConflictDoesNotImplyRerun          # A54: Conflict alone is not FixModel
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "Conflict"                         # the verdict name (line 419)
+          - "contradict"                       # how Conflict is described
+          - "user"                             # user-decision requirement
+
+  - id: clarification_and_interpretation
+    description: Vague prompts must trigger clarification (block on entities/states/rules) before model writing; the interpret step explains counterexamples in plain language rather than just emitting raw solver output
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - VaguePromptRequiresClarification   # A39: vague prompt → S2b_Clarify produces Clarification
+          - InterpretExplainsCounterexamples   # A13: S9 must produce ProofOfWork explaining counterexamples
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "vague"                            # vague-prompt detection (step 0)
+          - "Clarify the prompt"               # step 0 header
+          - "Counterexample found"             # step 9 interpretation template (line 356)
+          - "interpret"                        # step 9 vocabulary
+
+  # Note: skill_pipeline.als check IterationNotALoop is intentionally NOT mapped here.
+  # Per its comment ("This assertion trivially holds — it documents the structural
+  # limitation [util/ordering can't model cycles]"), it is a self-documented gap
+  # assertion. Mapping it to enforcement evidence would be misleading.
+
+  - id: report_persistence
+    description: Reconciliation and enforcement reports must be written to disk and remain mutable (re-runs overwrite); both artifacts exist as a pair
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - ReportsPersistedToDisk             # A55: both ReconciliationRpt + EnforcementRpt exist and are mutable
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "MANDATORY"
+          - "Persist the report"
+          - "system-models/reports"
+
+  - id: report_content_quality
+    description: Each discrepancy in the report has bidirectional references (model element + source location), an impact analysis, and a recommended action; reports become stale after iterate and freshness checks compare reports against the current model
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - ReportHasBidirectionalRefs         # A45: every discrepancy refs both model and source
+          - ReportIsActionable                 # A46: every discrepancy has impact + action
+          - ReportsStaleAfterIterate           # A61: reports are mutable; freshness checks compare against UserModel
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "model elements and source artifacts"  # bidirectional ref mandate (line 622)
+          - "bidirectional traceability"           # the core value (line 692)
+          - "**Impact**"                           # impact-analysis field in report format
+          - "**Recommended action**"               # recommended-action field
+          - "Last updated"                         # staleness convention for re-runs
+          - "stale"                                # staleness vocabulary
+
+  - id: examples_and_patterns
+    description: Writing a model requires consulting the patterns catalog (alloy-patterns.reference) and selecting a domain-specific pattern; example loading is style-driven (clarification gates which examples are read) with a per-style budget; SKILL.md's pattern summary covers every pattern category in the catalog
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - ModelRequiresPatterns               # A3: S5 must consult PatternsMd
+          - ExampleSelectionModeled             # A20: S4 (read example) requires Clarification
+          - ExampleSelectionRespectsBudget      # A48: at most 3 examples per style
+          - PatternsSyncedWithExamples          # A9: every pattern category in examples is in SKILL.md
+          - SkillMdCoversAllCategories          # A10: SKILL.md mentions all 8 pattern categories
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "alloy-patterns.reference"          # the patterns catalog file
+          - "domain-specific pattern"           # the consult-and-select mandate (step 6)
+          - "**Basics:**"                       # category 1 — must appear as bold header
+          - "**Structural:**"                   # category 2
+          - "**Temporal:**"                     # category 3
+          - "**UX / Access Control:**"          # category 4
+          - "**Data Conversion & Time-Series:**" # category 5
+          - "**Pipeline & Build:**"             # category 6
+          - "**Verification:**"                 # category 7
+          - "**Alloy 6 Essentials:**"           # category 8
+
+  - id: enforcement_audit_step_10b
+    description: Enforcement audit (step 10b/A/B) classifies each Aligned property as Enforced / Mentioned-but-unenforced / Missing-from-gate; Enforced verdicts require a complete gate audit chain; executable-code sources skip the prose audit and use the YAML map instead; the audit family runs in sequence (10b → 10b-A → 10b-B → iterate); the YAML map is authored alongside the model and grows during the discovery loop
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - EnforcementAuditRequired                  # A51: NL Aligned → must have enforcement level
+          - CodeSkipsEnforcementAudit                 # A52: code sources skip per-discrepancy enforcement (use YAML)
+          - EnforcementReportProducedByAudit          # A57: EnforcementRpt produced by S10b
+          - EnforcementAuditBeforeIterate             # A58: S10b before S10
+          - GateAuditRequiredForEnforced              # A59: every Enforced verdict has a gate audit chain
+          - GateAuditChainComplete                    # A60: passing audit means all chain links present
+          - EnforcementMapAuthoredWithModel           # A62: EnforcementMap is mutable + produced by S5_WriteModel
+          - EnforcementMapDrivenAudit                 # A63: code sources → S10b_B requires the map + checker
+          - GateArtifactCheckRequiresEnforcementRpt   # A64: S10b_A needs EnforcementRpt
+          - EnforcementChainOrdering                  # A65: 10b → 10b-A → 10b-B → 10 ordering
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "Enforcement audit"                  # step 10b header
+          - "step 10b"                           # step identifier
+          - "Three-level enforcement verdict"    # the verdict taxonomy
+          - "Mentioned but unenforced"           # the M verdict
+          - "Missing from gate"                  # the P verdict
+          - "Gate language"                      # imperative-vs-advisory distinction
+          - "gate audit chain"                   # 10b-A artifact-check semantics
+          - "10b-B"                              # YAML map (covers CodeSkipsEnforcementAudit)
+          - "alongside adding"                   # "build entry alongside the model" guidance
+          - "open-ended"                         # discovery loop in 10b-B
+
+  - id: reconciliation_step_9b
+    description: Reconciliation (step 9b) compares the verified model against included source artifacts, produces a discrepancy report with FixSource/FixModel/Conflict verdicts, supports partial reconciliation with documented exclusions, and can stop at a gap report instead of proceeding to iterate
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - ReconcileRequiresInterpretAndSpec   # A23: S9b needs Interpretation + SkillMd
+          - ReconcileBeforeIterate              # A24: S9b before S10
+          - FixModelImpliesRerun                # A25: FixModel discrepancy → model is mutable
+          - ReconciliationNonTrivial            # A26: at least one discrepancy is checked
+          - ReportOnlyIsValid                   # A27: gap report is a valid final deliverable
+          - ReconcileRequiresIncludedSources    # A29: S9b needs included sources
+          - BoundaryReviewRequiresSource        # A30: S5b needs the source system
+          - ReconcileChecksIncludedSources      # A47: code always included; others if marked included
+          - SkippedSourcesNotChecked            # A49: skipped sources are not in S9b.requires
+          - ReconcileReportProducedByReconcile  # A56: ReconciliationRpt produced by S9b
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "Reconcile against source artifacts"   # step 9b header (line 360)
+          - "step 9b"                              # step identifier
+          - "FixModel"                             # FixModel verdict
+          - "FixSource"                            # FixSource verdict
+          - "Partial reconciliation"               # included/skipped sources mechanism
+          - "Skipped artifacts"                    # skipped-source documentation
+          - "gap report"                           # report-only mode
+
+  - id: pipeline_dag_dependencies
+    description: The skill's pipeline is a DAG — every step's required artifacts are produced by an earlier step, no step runs out of order, and downstream artifacts go stale when upstream ones change
+    models:
+      - file: skill_pipeline.als
+        asserts:
+          - DependenciesSatisfied            # A1: no step reads a future artifact
+          - SingleProducer                   # A2: each artifact has exactly one producer
+          - RunRequiresModel                 # A4: S7 needs the written model
+          - RunRequiresTooling               # A5: S7 needs the runtime/jar/runner
+          - InterpretRequiresOutput          # A6: S9 needs run output
+          - ExamplesNotRequiredForRun        # A7: examples are design-time, not runtime
+          - ToolingIndependentOfSkill        # A8: S6 is independent of SKILL.md content
+          - IterateRequiresInterpret         # A12: S10 needs interpretation
+          - RunOutputStaleAfterIterate       # A16: re-run required after iterate
+          - ModelRequiresClarifiedInput      # A17: prompt flows through clarification
+    skill_texts:
+      - file: ../SKILL.md
+        must_mention:
+          - "run → interpret"                          # canonical pipeline order (early half)
+          - "reconcile → iterate"                      # canonical pipeline order (late half — split across newline in SKILL.md)
+          - "Clarify the prompt"                       # step 0 — clarification gate
+          - "before you run the model"                 # boundary review precedes run
+          - "Do not iterate"                           # interpret-before-iterate
+          - "step dependencies"                        # DAG semantics referenced

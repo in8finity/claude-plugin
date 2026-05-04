@@ -548,12 +548,78 @@ At each step, present what you did and what you need from the user. Don't procee
      pre-flight checklist, review template)
 
    **When to skip:**
-   - Source is executable code (enforcement is structural — if the code has the check, it runs)
+   - Source is executable code (enforcement is structural — if the code has the check, it runs).
+     But run the **enforcement-map check** instead (see step 10b-B) — code structure can drift
+     between commits, and the prose audit can't catch a gate that quietly disappeared in a refactor.
    - Source has no gate structure (e.g., a design doc with no decision points)
 
    **Persist the report:** After producing the enforcement audit, write it to
    `./system-models/reports/{domain}-enforcement.md` using the Write tool. This is mandatory —
    reports must survive beyond the conversation.
+
+10b-B. **Enforcement map (mechanical audit)** — When the source is executable code, the prose
+   enforcement report is not enough on its own. Prose can lie about code without anything noticing.
+   Generate a companion `system-models/reports/enforcement.yaml` that maps each verified property
+   to the mechanical evidence of its enforcement: model assertion names, code call sites, exit
+   codes, spec phrases, test names. The bundled checker walks the YAML and fails CI if any
+   claimed gate is missing — so a refactor that drops a gate becomes a build failure on the
+   next commit, not a discovery six months later.
+
+   See `references/enforcement-map.reference` for the full schema and authoring guidance.
+   The minimum viable entry is the property name plus one model assertion plus one code gate;
+   add more as you trace them. Empty fields are honest — they say "we proved this, we don't yet
+   know everywhere it's enforced."
+
+   Run the checker:
+
+   ```bash
+   bash ${CLAUDE_SKILL_DIR}/scripts/verify.sh \
+     --check-enforcement system-models/reports/enforcement.yaml
+   ```
+
+   Add `--check-coverage` to also flag any model `check Foo` that has no enforcement entry —
+   this catches "the model proves X but no one wrote down how X is enforced."
+
+   **When to use:** any project whose source includes executable code (Python, TS, Go, Java, …).
+   Skip when the source is purely instructions/protocol — step 10b-A's prose audit already covers
+   that case structurally.
+
+   **When to write the entry:** alongside adding `check Foo` to the `.als` file, not after.
+   The enforcement map should grow with the model, not be bolted on at the end.
+
+   **The map is a checklist, not a checker.** The mechanical script proves anchors still
+   resolve (terms exist, asserts are defined, files are present) — it does not judge
+   whether the cited language actually enforces the property. That judgment is yours
+   during the step 10b audit. The YAML's primary job is to make sure you **don't miss
+   a property**: walk every entry as the audit's iteration loop. For each one, read the
+   assertion, read the cited code/text gates, and judge enforcement (Enforced /
+   Mentioned-unenforced / Missing-from-gate / Counter-evidence). Don't audit from
+   memory and don't grep ad hoc — both risk skipping a property the YAML already
+   enumerates. (This is exactly the bug class that motivated the YAML in the first
+   place: an LLM-written prose audit "remembered" four enforcement sites but missed
+   the fifth.)
+
+   **The map is open-ended.** Before declaring the audit complete, scan for enforcement
+   points the YAML doesn't yet know about — code/tests/skill text changes can
+   introduce new gates that need entries. Specifically check:
+
+   - **Code or tests changed since the YAML was last touched?** Run
+     `git log --since=$(stat -f %Sm system-models/reports/enforcement.yaml) --name-only`
+     over the project's source roots. For each new or modified file: does it gate,
+     reject, or assert anything the model proves? If yes, add or extend an entry.
+   - **SKILL.md / spec text changed?** New imperative clauses ("must", "MANDATORY",
+     "blocks", "do not proceed unless") that aren't covered by an existing entry's
+     `must_mention` are unaudited. Either add a phrase to the relevant entry or
+     create a new entry.
+   - **Model has new `check Foo`?** Run `verify.sh --check-enforcement <yaml>
+     --check-coverage` — any flagged check is a property the model proves but the
+     YAML doesn't audit. Resolve before completing the audit: add an entry, or
+     mark it as an intentional gap with a YAML comment (the way `IterationNotALoop`
+     is documented in `formal-modeling/self-models/enforcement.yaml`).
+
+   A static YAML against an evolving codebase becomes a false-completeness signal —
+   the auditor walks 13 entries, says "all enforced," and never sees the 14th gate
+   added last week. Discovery is part of the audit, not a separate task.
 
 **Do not proceed to iterate (fixing model or source) until both reconciliation and enforcement
 audit are complete. Completion means both report files exist on disk:**
@@ -766,6 +832,12 @@ bash ${CLAUDE_SKILL_DIR}/scripts/verify.sh --self --both    # both pipelines
 # Direct runners (when you need full formatted output)
 bash ${CLAUDE_SKILL_DIR}/scripts/alloy_run.sh /path/to/model.als
 bash ${CLAUDE_SKILL_DIR}/scripts/dafny_run.sh /path/to/model.dfy
+
+# Enforcement-map check (mechanical audit; see step 10b-B)
+bash ${CLAUDE_SKILL_DIR}/scripts/verify.sh --check-enforcement \
+  system-models/reports/enforcement.yaml
+bash ${CLAUDE_SKILL_DIR}/scripts/verify.sh --check-enforcement \
+  system-models/reports/enforcement.yaml --check-coverage
 ```
 
 ### When to use Alloy vs Dafny

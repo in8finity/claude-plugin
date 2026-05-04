@@ -2,12 +2,14 @@
 # Unified verification runner — routes .als to Alloy, .dfy to Dafny.
 #
 # Usage:
-#   ./verify.sh model.als          # runs Alloy pipeline
-#   ./verify.sh model.dfy          # runs Dafny pipeline
-#   ./verify.sh --self             # self-verifies the skill (all models)
-#   ./verify.sh --self --dafny     # self-verifies using Dafny only (fast)
-#   ./verify.sh --self --alloy     # self-verifies using Alloy only
-#   ./verify.sh --self --both      # self-verifies using both (cross-check)
+#   ./verify.sh model.als                                    # runs Alloy pipeline
+#   ./verify.sh model.dfy                                    # runs Dafny pipeline
+#   ./verify.sh --self                                       # self-verifies the skill (all models + enforcement)
+#   ./verify.sh --self --dafny                               # self-verifies using Dafny only (fast)
+#   ./verify.sh --self --alloy                               # self-verifies using Alloy only
+#   ./verify.sh --self --both                                # self-verifies using both engines + enforcement
+#   ./verify.sh --self --enforcement                         # self-verifies the enforcement map only
+#   ./verify.sh --check-enforcement <enforcement.yaml> [opts] # mechanical audit of enforcement.yaml
 #
 # Exit code: 0 if all pass, 1 if any failures.
 
@@ -15,6 +17,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── enforcement-map check mode ──────────────────────────────────────────────
+
+if [[ "${1:-}" == "--check-enforcement" ]]; then
+  shift
+  if [[ -z "${1:-}" ]]; then
+    echo "Usage: verify.sh --check-enforcement <enforcement.yaml> [--project-root <path>] [--format text|json] [--check-coverage]" >&2
+    exit 1
+  fi
+  exec python3 "$SCRIPT_DIR/check_enforcement.py" "$@"
+fi
 
 # ── self-verification mode ──────────────────────────────────────────────────
 
@@ -89,6 +102,25 @@ if [[ "${1:-}" == "--self" ]]; then
     echo ""
   fi
 
+  if [[ "$MODE" == "--enforcement" || "$MODE" == "--both" ]]; then
+    echo "┌─ Enforcement-map check (mechanical audit) ──────────────┐"
+    ENFORCE_YAML="$SKILL_DIR/self-models/enforcement.yaml"
+    if [[ -f "$ENFORCE_YAML" ]]; then
+      if ENF_OUT=$(python3 "$SCRIPT_DIR/check_enforcement.py" "$ENFORCE_YAML" 2>&1); then
+        ENF_PASS=$(echo "$ENF_OUT" | grep -oE '[0-9]+/[0-9]+ properties pass' | head -1)
+        echo "  ✓  $ENF_PASS"
+      else
+        echo "  ✗  enforcement check failed:"
+        echo "$ENF_OUT" | sed 's/^/      /'
+        FAIL=1
+      fi
+    else
+      echo "  (no self-models/enforcement.yaml — skipping)"
+    fi
+    echo "└───────────────────────────────────────────────────────────┘"
+    echo ""
+  fi
+
   if [[ "$FAIL" -eq 0 ]]; then
     echo "═══ ALL PASS ═══"
   else
@@ -103,6 +135,7 @@ MODEL="${1:-}"
 if [[ -z "$MODEL" ]]; then
   echo "Usage: verify.sh <model.als|model.dfy>" >&2
   echo "       verify.sh --self [--dafny|--alloy|--both]" >&2
+  echo "       verify.sh --check-enforcement <enforcement.yaml> [--project-root <path>] [--format text|json] [--check-coverage]" >&2
   exit 1
 fi
 
