@@ -64,6 +64,12 @@ properties:
       - file: skills/pm/executing/SKILL.md
         must_mention: ["sticky", "exit 10"]
     tests: [G8, G46s, G47, G48]
+    # Catches NEW call sites of the protected primitive that aren't in
+    # the file-list above — see "Closure gates" below.
+    closure_gates:
+      - protected: store.append_claim
+        gate:      store.check_sticky_eligibility
+        search:    "skills/pm/scripts/**/*.py"
 ```
 
 ### Field semantics
@@ -77,6 +83,10 @@ properties:
 | `code_gates[].file` | Path to source file (relative to project root). |
 | `code_gates[].must_call` | A function/method the file must call. Python files use AST (matches dotted names like `store.check_sticky_eligibility` and bare-name imports). Other languages use a regex fallback (`<tail>(`) and emit a `(regex fallback — non-Python)` note. |
 | `code_gates[].must_exit` | An integer exit code the file must produce via `return N`, `sys.exit(N)`, `exit(N)`, or `raise SystemExit(N)`. |
+| `closure_gates[].protected` | Dotted name of a protected primitive (e.g. `store.append_claim`). The checker enumerates EVERY Python call site under `search` and treats each as a gate row. |
+| `closure_gates[].gate` | Dotted name of a function that must be called earlier in the same enclosing function as each protected call site. Site fails if the gate isn't called, or is called only after the protected call. |
+| `closure_gates[].search` | Glob (relative to project root) restricting which files are walked. Default `**/*.py` for `python`, `**/*.sh` for `bash`. |
+| `closure_gates[].language` | `python` (default, stdlib `ast`) or `bash` (requires `bashlex` — `pip install bashlex`). Suffix filter follows the language: `.py` for python, `.sh`/`.bash` for bash. |
 | `skill_texts[].file` | Path to a markdown / spec / instruction file. |
 | `skill_texts[].must_mention` | List of phrases (case-insensitive substring). All must appear. |
 | `tests` | List of test names. Searched as `def [test_]<name>\b` across files matching `tests_glob`. |
@@ -137,6 +147,136 @@ evaluate test quality — only presence.
 says "the system rejects X" is a *claim*, not a *check*. If the rejection is
 implemented in code, mark the code gate; reserve `skill_texts` for protocols
 where the text *is* the enforcement (LLM checklists, human runbooks).
+
+## Closure gates — catching new call sites the file list never named
+
+`code_gates` answers "do the files I named still call the gate?" — perfect for
+detecting *deletion* of a check during refactor. It misses the dual class:
+**a new file is added that calls the protected primitive but never makes it
+into anyone's file list**. The model still passes (it doesn't know about the
+new file), the file-list check still passes (the new file isn't listed), the
+gate has been silently bypassed.
+
+`closure_gates` closes that gap. Instead of "file X calls Y," it says
+*"every call site of the protected primitive Y must be preceded by a call
+to the gate function Z, in the same enclosing function."* The checker walks
+the AST of every Python file under `search`, attributes each `Call` to its
+nearest enclosing function (nested defs scoped correctly), and emits one
+gate row per call site:
+
+```
+✓ skills/pm/scripts/executing.py:42 execute() calls store.append_claim  (gated by store.check_sticky_eligibility at line 38)
+✗ skills/pm/scripts/pull.py:67       pull()    calls store.append_claim  (no preceding call to store.check_sticky_eligibility in pull())
+```
+
+Whenever a developer adds a new path that produces the protected event, the
+checker discovers the new call site automatically and demands a gate. There
+is no list to keep in sync.
+
+### When to use it
+
+- You have a **protected primitive** (a function whose every call must be
+  preceded by some safety check). Examples: status writes, lock acquisition,
+  payment authorization, cache invalidation — anything where "calling X
+  without first checking Y" is the bug class.
+- The check is **lexical and synchronous** — gate must be visible in the
+  same function body as the protected call. Cross-function reasoning (the
+  gate is in the caller, the primitive is in a helper) is out of scope:
+  the AST walk doesn't follow the call graph. Refactor so the gate sits
+  next to the primitive call, or list both in `closure_gates` so the
+  helper's call site is independently verified.
+- **Languages: Python and bash.** Python uses stdlib `ast` (no extra dep).
+  Bash uses `bashlex` (lazy import — only required when a `closure_gates`
+  entry sets `language: bash`; install with `pip install bashlex`, or
+  `pip install --break-system-packages bashlex` on macOS Homebrew Python).
+  Other languages currently fall back to file-list `code_gates`.
+
+### Bash specifics
+
+- **Function syntaxes:** both `name() { … }` and `function name { … }`
+  (with or without parentheses) are detected. Anonymous one-shot subshells
+  `( … )` are not function definitions and don't open a new scope.
+- **Command substitution:** `result=$(append_claim …)` and `<(append_claim
+  …)` are walked — the inner command is recorded as a call site at the
+  line where the substitution occurs.
+- **Sourced files don't cross scope.** `source ./lib.sh` doesn't follow:
+  the gate must be lexically present in the same function as the protected
+  call, not in a sourced helper. Refactor or list both files in `search`.
+- **Module-level commands** (top-level statements outside any function)
+  are attributed to a synthetic `<script>()` scope per file. This makes
+  script-level patterns ("the script must call X before Y") work the same
+  way as function-level patterns. Caveat: the synthetic scope is per-file,
+  so a `set -e` in one file doesn't gate calls in another.
+- **Heredocs** and process substitutions are parsed by `bashlex`; commands
+  embedded in them are walked. Strings are not parsed for embedded calls
+  (a `eval "append_claim …"` is invisible — same as Python's
+  `getattr(obj, name)()`).
+
+### Pairing with `code_gates`
+
+Use both together. `code_gates` documents the *expected* sites and tracks
+deletion; `closure_gates` enforces coverage over *all* sites and catches
+silent additions. They never duplicate gate rows in the report — each runs
+its own check against its own input.
+
+### Authoring tip
+
+When you write a `closure_gates` entry, the checker's first run usually
+surfaces sites you didn't know existed (helpers, retry paths, test seams).
+Treat each one as a decision: gate it, exclude it via a tighter `search`,
+or refactor it to share the gated path. The list of call sites is itself a
+useful artifact — it's the protocol's actual exposure surface.
+
+### Call-site enumeration as a forcing function (`--list-call-sites`)
+
+`closure_gates` answers "is this *one* primitive's gate consistent across
+its sites?" — but a project usually has several protected primitives, and
+the dangerous case is the one nobody added to any entry. Declare the set
+once at the top of the YAML:
+
+```yaml
+protected_primitives:
+  - name: store.append_claim
+    language: python
+    search: "skills/pm/scripts/**/*.py"
+  - name: store.mark_done
+    language: python
+    search: "skills/pm/scripts/**/*.py"
+  - name: trigger_payment
+    language: bash
+    search: "scripts/**/*.sh"
+
+properties:
+  - id: ...
+```
+
+Run with `--list-call-sites`. The checker enumerates every call site of
+every declared primitive, groups them by primitive, and marks which
+primitives are *audited* (some `closure_gates` entry names them) vs.
+*dangling* (no enforcement entry):
+
+```
+* store.append_claim  (python - skills/pm/scripts/**/*.py)
+  audited by closure_gates: yes
+  - skills/pm/scripts/executing.py:42  execute()
+  - skills/pm/scripts/pull.py:67       pull()
+  - skills/pm/scripts/finished.py:71   mark_done()
+  3 sites across 3 files
+
+* store.mark_done  (python - skills/pm/scripts/**/*.py)
+  audited by closure_gates: NO - no closure_gates entry targets this primitive
+  - skills/pm/scripts/finished.py:88  mark_done()
+  1 site across 1 file
+```
+
+The "NO" rows are the forcing function: they say "you declared this
+matters, but no enforcement entry checks any of these sites." The author
+either adds a `closure_gates` rule that targets the primitive, or removes
+it from `protected_primitives` (acknowledging it doesn't actually need
+gating after all). Either action is a deliberate decision; silence is not.
+
+The flag is **informational** — it does not change the exit code. Pair it
+with `--check-coverage` for the full review checklist on every commit.
 
 ## What this still won't catch
 

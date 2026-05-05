@@ -1,7 +1,7 @@
 {
   "name": "formal-methods",
   "description": "Formal modeling and hypothesis-driven debugging using Alloy 6 and Dafny. Includes formal-modeling (write, run, and interpret Alloy 6 or Dafny models for state machines, data invariants, API contracts, permission matrices, and business rules — with reconciliation and enforcement-audit workflow) and formal-debugger (structured bug investigation using formal models for hypothesis-driven root cause analysis).",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "license": "CC-BY-NC-SA-4.0",
   "author": {
     "name": "Alexander Morozov"

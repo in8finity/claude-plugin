@@ -1,0 +1,8 @@
+properties:
+  - id: sticky_chain_coherence_closure_bash
+    description: Every call site of append_claim in shell must be preceded by check_sticky_eligibility
+    closure_gates:
+      - protected: append_claim
+        gate: check_sticky_eligibility
+        search: "scripts/**/*.sh"
+        language: bash

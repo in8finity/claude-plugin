@@ -1,0 +1,15 @@
+protected_primitives:
+  - name: store.append_claim         # audited — referenced by closure_gates below
+    language: python
+    search: "skills/**/*.py"
+  - name: store.check_sticky_eligibility  # dangling — no closure_gates targets it
+    language: python
+    search: "skills/**/*.py"
+
+properties:
+  - id: sticky_chain_coherence_closure
+    description: Every call site of append_claim must be preceded by check_sticky_eligibility
+    closure_gates:
+      - protected: store.append_claim
+        gate: store.check_sticky_eligibility
+        search: "skills/**/*.py"

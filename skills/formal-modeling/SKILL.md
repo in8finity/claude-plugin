@@ -349,6 +349,120 @@ At each step, present what you did and what you need from the user. Don't procee
    ```
    The user can then sign off on the boundaries before you run the model.
 
+8b. **Abstract-boundary primitive check** — When an invariant in the model is enforced at
+   runtime by a primitive that lives BELOW the model — at a database, kernel, network, or
+   external-service boundary — the abstract model collapses what the implementation does in
+   multiple steps into a single atomic predicate. The bug class this hides:
+   *the primitive the boundary actually exposes is weaker than the precondition the model
+   demands.* The model passes; production violates the invariant.
+
+   **When to write a primitive-strength sub-model** — at least one of these is true:
+   - A model precondition is enforced by an external storage operation (CAS, transaction,
+     foreign-key constraint, conditional write).
+   - A model precondition is enforced by a kernel/network primitive (lock acquisition,
+     socket auth, replay-protection token).
+   - The implementation does **two or more reads** of the boundary state for one logical
+     operation, and the primitive's success guarantee is on identity (pointer/version),
+     not on the predicate the model checks.
+   - The model uses a single-step transition like `commitClaim` whose precondition refers
+     to mutable state held outside the process.
+
+   **When to skip** — the model's invariant is purely about in-process state, OR the caller
+   does exactly one atomic boundary call and trusts its return value, OR the boundary is
+   already known-strong (e.g. a serializable transaction wrapping the entire critical section).
+
+   **What to write.** A short standalone `.als` file (≈80 lines) with five named ingredients —
+   see `references/primitive-strength-template.als` for the parameterized blank, and
+   `references/primitive-strength-example.als` for a fully-runnable worked example
+   (TOCTOU on a CAS-protected head — the bug pattern from hashharness-pm 0.6.4):
+
+   1. **Boundary state** — what the boundary tracks (head pointer, row version, lock state).
+   2. **Primitive** — what the boundary actually guarantees, stated literally. Not what you
+      wished for. Not what the docs imply. *What the wire/syscall returns.*
+   3. **Caller pattern** — every read your code performs, in order. If the caller does
+      N>1 reads, model all N reads explicitly.
+   4. **Adversary** — between any two caller steps, what other actors can do. Default = anything.
+      Understating the adversary makes the assertion artificially pass — be honest.
+   5. **Strength assertion** — `caller-pattern-with-primitive ⟹ abstract-precondition`.
+      Counterexample = primitive too weak for this caller. Holds = wiring is sound.
+
+   **Read the verdict like this:**
+   - **Buggy → counterexample, fixed → holds.** Most useful outcome. The fix you proposed
+     (e.g. thread the first read through to CAS) closes the gap; the model proves it.
+     Apply the fix, re-reconcile against code in step 9b.
+   - **Both fail.** The primitive is too weak even when used correctly. The fix has to move
+     to the boundary itself (e.g. switch to a CAS-with-status-check, or wrap in a transaction).
+   - **Both hold.** Either the primitive is already strong enough (good — explicitly note it
+     in the boundary review), OR your adversary is too tame. Re-examine ingredient #4: can
+     other writers really not interleave between your reads? If the adversary is in fact tame
+     under operational constraints (single writer, lock held), document that in the boundary
+     review as a load-bearing assumption.
+
+   Persist the strength sub-model alongside the main model (e.g. `system-models/{domain}-strength.als`).
+   It feeds into reconciliation (step 9b): if buggy fails, the source artifact's call pattern
+   is the FixSource verdict; if both fail, the boundary's primitive is the FixSource verdict.
+
+8c. **Retry-loop fairness check** — When the protocol contains a retry path that re-evaluates
+   candidate selection on each iteration, single-step assertions (`always all t | lone (Committed
+   & task.t)`) cannot observe the loop. They prove safety at every state, including states where
+   N>0 candidates exist and zero progress is being made. The bug class this hides:
+   *the candidate-selection function is shared across actors and deterministic, so two workers
+   compute identical results and collide indefinitely.*
+
+   **When to write a retry-loop sub-model** — at least one of these is true:
+   - The protocol has a retry loop with a `--max-retries` style bound, after which a worker
+     gives up silently.
+   - Candidate selection (which task to attempt next) is determined by a sort key that's
+     visible to all workers (priority, age, ID).
+   - Multiple actors poll the same store and race for the same resources.
+   - The proof obligation is *liveness* ("eventually one worker claims something"), not
+     just safety ("at most one worker holds a claim").
+
+   **When to skip** — the protocol is single-actor, OR the selection function is intentionally
+   randomized, OR fairness is enforced by an external scheduler (e.g. the queue server itself
+   distributes tasks rather than letting workers self-select).
+
+   **What to write.** A short standalone `.als` file modeling the candidate-selection
+   primitive — see `references/retry-loop-example.als` for a fully-runnable worked example
+   (deterministic collision via shared `(context_priority, created_at)` sort, the bug pattern
+   from hashharness-pm 0.6.4). Five named ingredients, paralleling the primitive-strength model:
+
+   1. **Sort key** — the *actual* production sort, not "some total order." If your code sorts
+      by `(priority, created_at)`, the model sorts by `(priority, created_at)`. The bug lives
+      in the specific tuple, not in abstract orderings.
+   2. **Selection function** — `selectNext(pool, skipSet)` returns the first-by-sort element
+      of `pool − skipSet`. Model it as a constraint, not a lookup.
+   3. **Candidate pool** — what each worker sees as runnable. Default = the same view shared
+      by all workers, modeling pollers reading the same store at the same wall clock.
+   4. **Buggy caller** — empty or non-updating skip-set. Models the "re-list, re-sort,
+      re-pick" loop that re-selects the contested task on every retry.
+   5. **Fixed caller** — skip-set captures CAS-loss history. Modeled as a single
+      post-resolution snapshot: W2.skipSet = {W1.selected}.
+
+   **Read the verdict like this:**
+   - **Buggy → counterexample, fixed → holds.** The fix you proposed (track skip-set across
+     iterations) closes the gap; concrete counterexample shows the collision pattern.
+     Apply the fix, re-reconcile against code in step 9b.
+   - **Buggy holds.** Either your selection function is non-deterministic (rare) or your
+     adversary model is too tame. Re-examine the candidate pool — are workers really reading
+     the same view at the same time? In production, yes.
+   - **Fixed fails.** The proposed fix isn't sufficient. Common cause: the skip-set is
+     scoped to one iteration but cleared between calls, so a multi-call worker re-picks
+     the same task on a fresh invocation. Either widen the skip-set's lifetime or push
+     fairness to the server (priority-aware dispatch).
+
+   **Tier guidance.** This is the *medium* tier from the proposer's three-tier framing:
+   model the actual sort key and produce a concrete counterexample. Cheap tier (just an
+   abstract `Iteration` sig) catches "could starve" but not "deterministically does."
+   Expensive tier (TLA+ port with fairness constraints) is overkill for most protocols —
+   skip unless you genuinely need to prove "every runnable task is eventually claimed,"
+   which Alloy's bounded checking can't certify.
+
+   Persist the fairness sub-model alongside the main model (e.g.
+   `system-models/{domain}-fairness.als`). Tie it back into reconciliation (step 9b) the
+   same way as 8b: counterexample → FixSource on the call pattern, both-fail → FixSource
+   on the candidate-selection primitive itself.
+
 9. **Run → Interpret → Re-run loop** — Execute the model using `bash ${CLAUDE_SKILL_DIR}/scripts/verify.sh /path/to/model.als` via the Bash tool. Then proactively present results:
    - All checks pass: *"All N assertions hold. Here's what each one proves: [list]. The model found
      no counterexamples — your invariants are consistent within scope M. Want to increase scope
@@ -569,6 +683,17 @@ At each step, present what you did and what you need from the user. Don't procee
    The minimum viable entry is the property name plus one model assertion plus one code gate;
    add more as you trace them. Empty fields are honest — they say "we proved this, we don't yet
    know everywhere it's enforced."
+
+   **Two gate kinds, complementary.** `code_gates` is file-listed: "this file calls X" —
+   catches *deletion* of a check during refactor. `closure_gates` is closure-based: "every
+   call site of protected primitive Y, anywhere in the project, must be preceded by gate Z
+   in the same enclosing function" — catches *silent additions* (a new file produces the
+   protected event but nobody added it to the file list). Use both. Whenever the model
+   protects a primitive whose every call must be checked (status writes, lock acquisition,
+   permission gates), declare a `closure_gates` entry; the AST walker discovers new call
+   sites automatically and demands the gate. Supported languages: `python` (stdlib, no
+   extra dep) and `bash` (requires `bashlex`). See `references/enforcement-map.reference`
+   §"Closure gates" for when the lexical-scope limitation matters and how to pair the two.
 
    Run the checker:
 

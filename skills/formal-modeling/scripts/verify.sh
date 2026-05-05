@@ -117,6 +117,29 @@ if [[ "${1:-}" == "--self" ]]; then
     else
       echo "  (no self-models/enforcement.yaml — skipping)"
     fi
+
+    # Smoke tests for the checker itself — closure_gates support across
+    # languages. Optional bash test skips cleanly without bashlex.
+    for CG_TEST in "$SKILL_DIR/tests/test_closure_gates.py" \
+                   "$SKILL_DIR/tests/test_closure_gates_bash.py" \
+                   "$SKILL_DIR/tests/test_call_site_listing.py" \
+                   "$SKILL_DIR/tests/test_primitive_strength.py" \
+                   "$SKILL_DIR/tests/test_retry_loop.py"; do
+      [[ -f "$CG_TEST" ]] || continue
+      NAME="$(basename "$CG_TEST" .py)"
+      if CG_OUT=$(python3 "$CG_TEST" 2>&1); then
+        SUMMARY="$(echo "$CG_OUT" | tail -1 | sed 's/^OK — //; s/^SKIP — //')"
+        if echo "$CG_OUT" | tail -1 | grep -q '^SKIP'; then
+          echo "  •  $NAME — skipped ($SUMMARY)"
+        else
+          echo "  ✓  $NAME — $SUMMARY"
+        fi
+      else
+        echo "  ✗  $NAME:"
+        echo "$CG_OUT" | sed 's/^/      /'
+        FAIL=1
+      fi
+    done
     echo "└───────────────────────────────────────────────────────────┘"
     echo ""
   fi
