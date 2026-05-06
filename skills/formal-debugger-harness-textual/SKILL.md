@@ -1,0 +1,724 @@
+---
+name: formal-debugger-harness-textual
+description: >
+  EXPERIMENTAL — UNDER TESTING. Unstable variant; behaviour and gates may change without
+  backwards-compatible migration. Structured bug investigation using textual formal models for
+  hypothesis-driven debugging, with hashharness MCP storage as the append-only backend
+  (textual-only variant of formal-debugger, no solver execution). Builds scoped textual models (state machines, sequence diagrams, schemas,
+  invariant tables — see `references/representation-menu.md`) covering normative rules, data
+  constraints, causal chains, and observability, then walks them by hand against collected
+  evidence. Use whenever the user reports a bug, incident, or unexpected behavior and wants
+  rigorous investigation backed by hashharness's append-only hash-chained storage AND wants to
+  avoid Alloy/Dafny tooling. Trigger on "investigate", "root cause", "debug this", "why does
+  this happen", "find the bug", "postmortem", or any unexplained symptom. Valuable for:
+  business-rule bugs, state machine errors, workflow inconsistencies, cross-service
+  disagreements, investigations where the obvious explanation was already checked. Not for
+  simple stack traces or typos — use when the problem space is large enough that unstructured
+  search would waste time or miss the real cause.
+---
+
+# Formal Debugger (HashHarness, textual-models variant)
+
+> ⚠️ **EXPERIMENTAL — UNDER TESTING.** This variant is unstable. Behaviour, gates, eval
+> coverage, and the representation-menu vocabulary may change without backwards-compatible
+> migration. Do NOT rely on this skill for production investigations or anything irreversible
+> until it stabilises. State this fact to the user at the start of any investigation that
+> uses this skill, and ask whether they want to proceed under those terms or fall back to
+> `formal-debugger-harness` (solver-backed) or `formal-debugger` (canonical filesystem).
+
+> **Variant scope**: same investigation protocol as `formal-debugger-harness`, with two
+> differences:
+> 1. **No model execution.** Models are textual artifacts (Mermaid diagrams, schemas,
+>    invariant tables — see `references/representation-menu.md`). The skill does not invoke
+>    Alloy, Dafny, or any solver; the agent walks the model by hand against the evidence.
+> 2. **Storage backend** is hashharness MCP (same as `formal-debugger-harness`). Several
+>    PW0-strict rules become storage invariants (immutability, hash chain integrity,
+>    evidence-hash binding).
+
+Uses `references/representation-menu.md` for the textual model vocabulary. Hypothesis accepted
+only when no other compatible hypothesis remains undistinguished. **Production first** — prefer
+`direct` production queries over `interpreted` code reading at every step.
+
+#### Step 0. Document the symptom
+
+The investigation is stored as **hashharness items** (an MCP server providing
+append-only hash-chained text storage). All records — reports, hypothesis
+events, evidence, model changes — are created through MCP tool calls.
+
+The MCP tools are:
+- `mcp__hashharness__set_schema` — declare item types and link rules; CAS-protected,
+  versioned (pass `expected_prev` = current schema head's `record_sha256` when updating;
+  omit on initial set). Each accepted item is bound to the schema head as of its write time.
+- `mcp__hashharness__get_schema` — read the current schema (or pass `at=<schema record_sha256>`
+  for a historical version)
+- `mcp__hashharness__get_schema_history` — full genesis-to-head schema chain (audit)
+- `mcp__hashharness__get_schema_version` — fetch one schema version by its `record_sha256`
+- `mcp__hashharness__create_item` — create a new immutable item; `created_at` is
+  server-stamped and rejected if caller-supplied
+- `mcp__hashharness__find_items` — search by `text`, `title`, `work_package_id`, or `all`
+- `mcp__hashharness__get_item_by_hash` — fetch by `text_sha256` (the storage key)
+- `mcp__hashharness__get_work_package` — fetch all items for one exact `work_package_id`
+  (the canonical read path for the materialization protocol — see below)
+- `mcp__hashharness__find_tip` — current head of a chain for one (work_package_id,
+  item_type) pair. Use before writing into a chain that declares `chain_predecessor: true`.
+- `mcp__hashharness__find_tips_bulk` — batched `find_tip` for multiple chains in one call
+- `mcp__hashharness__query_chain` — walk all referenced items transitively from a root
+- `mcp__hashharness__verify_chain` — recompute and validate every hash in the reachable graph
+
+**Inter-item links reference `record_sha256`.** `text_sha256` is the storage key — use it
+with `get_item_by_hash` and quote it in prose for human readability. Every value under
+`links` must be the target item's `record_sha256` (the hash of text + metadata + links
+combined). The server rejects `create_item` calls whose link values are `text_sha256`s.
+
+Each investigation gets a unique `work_package_id` (kebab-case from the symptom, e.g.,
+`webhook-drops-2pct`). All items for that investigation carry that `work_package_id` in
+their metadata. The agent should also create `./investigations/<slug>/` as a human-facing
+directory holding **derived markdown views** of the work package (regenerated on demand —
+they are not the source of truth). Project-wide tooling lives in `./investigations/tooling-inventory.md`;
+do not fork it per investigation.
+
+Files under `./investigations/<slug>/`:
+1. `work-package.md` — pointer file with `slug`, `work_package_id`, symptom sketch,
+   Report v1's `text_sha256`, and the latest materialization timestamp
+2. `investigation-report.md` — generated summary view of the current Report chain
+3. `evidence-log.md` — generated view of all `Evidence` items
+4. `hypothesis-log.md` — generated view of all `HypothesisEvent` items
+5. `model-change-log.md` — generated view of all `ModelChange` items
+
+These markdown files are **GENERATED VIEWS**, regenerated from hashharness whenever the
+materialization protocol fires. The append-only proof remains the stored items. Do not
+maintain markdown logs incrementally after every item creation.
+
+Item types and links (set once via `set_schema` with this payload):
+
+```json
+{
+  "types": {
+    "Report": {
+      "links": {
+        "prevReport": {"kind": "single", "target_types": ["Report"], "chain_predecessor": true}
+      }
+    },
+    "HypothesisEvent": {
+      "links": {
+        "prevHyp":         {"kind": "single", "target_types": ["HypothesisEvent", "Report"]},
+        "citedEvidence":   {"kind": "many",   "target_types": ["Evidence"]},
+        "supersedes":      {"kind": "single", "target_types": ["HypothesisEvent"]}
+      }
+    },
+    "Evidence": {
+      "links": {
+        "parentHypEvent": {"kind": "single", "target_types": ["HypothesisEvent"]}
+      }
+    },
+    "ModelChange": {
+      "links": {
+        "prevModel":      {"kind": "single", "target_types": ["ModelChange", "Report"]},
+        "parentHypEvent": {"kind": "single", "target_types": ["HypothesisEvent"]}
+      }
+    }
+  }
+}
+```
+
+**Why `chain_predecessor` is on `prevReport` only.** The hashharness server's
+`chain_predecessor: true` flag enables compare-and-swap on a per-(work_package_id, item_type)
+head: the first item must omit the predecessor link, subsequent items must reference the
+current head. This aligns cleanly with `prevReport` (Report v1 omits, v2 → v1, v3 → v2). It
+does NOT align with `prevHyp` / `prevModel`, where the schema's `target_types` deliberately
+allow anchoring on Report v1 (so the first H of a chain says `prevHyp = Report-v1-record-sha`
+rather than omitting). Choosing chain-CAS protection there would require dropping the
+explicit Report-v1 anchor and relying on tip-discovery instead. We keep the explicit anchor
+because it makes the chain genesis legible in the materialized log; protection against
+concurrent-fork relies on the single-writer assumption (one Claude instance per investigation).
+A future schema revision could split anchoring from chain order via two separate links.
+
+**Materialization protocol for readable logs.** Regenerate the four log markdown files
+only when one of these is true:
+- the user asks for clarification, status, or a human-readable summary
+- the investigation reaches conclusion or handoff
+- you (the agent) need to review prior reasoning across many records
+
+When that happens:
+1. Call `mcp__hashharness__get_work_package` for the active `work_package_id`. Optional
+   per-type `find_items` calls are allowed for formatting, but the canonical read path is
+   `get_work_package`.
+2. Sort returned items by `created_at` (server-stamped, monotonic; tie-break by
+   `text_sha256`).
+3. Rewrite `investigation-report.md`, `evidence-log.md`, `hypothesis-log.md`, and
+   `model-change-log.md` from scratch — these are derived views, not append-only.
+4. Start each generated file with a header containing: `Generated from hashharness via
+   get_work_package`, `Work package: <id>`, `Generated at: <iso8601>`, `Source of truth:
+   hashharness items`.
+5. Include item timestamps, titles, hashes, text, and important links (`prev*`,
+   `parent*`, `citedEvidence`, `supersedes`) so the markdown stays human-readable
+   without hiding the chain structure.
+
+`scripts/materialize.py <work_package_id> <output-dir>` is the canonical implementation
+of this protocol — one MCP call to `get_work_package`, sort by created_at, write the
+four markdown views with the correct headers. Use it instead of hand-rolling.
+
+Storage is append-only and chain-integrity-checked: items are immutable
+(rewrites with same `text` rejected), `record_sha256` is server-computed,
+links are type-validated at `create_item` time, and the `citedEvidence: many`
+link auto-derives `citedEvidenceHash` from sorted referenced text-hashes.
+`verify_chain(hash)` recomputes everything transitively.
+
+**Symptom-verification anchor.** At Step 0b, the first H event (H0-1) has
+`event=symptom-claimed` and `prevHyp` linking to Report v1. E1 then
+attaches to H0-1 via `parentHypEvent` — keeps the evidence-must-attach
+rule consistent from the very first evidence.
+
+**Blocking precondition (PW0-init).** Before proceeding to Step 0a, Claude MUST:
+1. Verify the schema is set via `mcp__hashharness__get_schema`. If empty, call
+   `mcp__hashharness__set_schema` with the payload above (omit `expected_prev` on initial
+   set; pass `expected_prev=<current schema head record_sha256>` if updating later).
+   This is normally a one-time environment setup, but verify per-investigation. If
+   `mcp__hashharness__get_schema_history` returns more than one version, audit-trail
+   readers should fetch each item's `schema_sha256` to validate against the as-of schema.
+2. Choose a `work_package_id` and a `slug` (kebab-case from symptom). Create
+   `./investigations/<slug>/` and write `work-package.md` with: the `slug`,
+   `work_package_id`, symptom sketch, and placeholders for Report v1's `text_sha256`
+   (the storage key) and `record_sha256` (the link id used for `prevReport`).
+3. Create Report v1 via `mcp__hashharness__create_item` with `item_type=Report`, no
+   `prevReport` link, and the symptom sketch as the `text`. The server stamps `created_at`;
+   do not supply it. Update `work-package.md` with the returned `text_sha256` and `record_sha256`.
+4. Show the user the resulting `text_sha256` AND `record_sha256` of Report v1 AND the path to
+   `./investigations/<slug>/work-package.md`.
+
+Claude MUST NOT collect evidence, read code, or run queries before Report v1 exists
+AND `work-package.md` is on disk. PW0-init requires both: storage acknowledgement of
+Report v1's creation AND the human-pointer file existing.
+
+Pin down the symptom — ask and record: **What** (exact wrong behavior), **Where** (service,
+endpoint), **When** (always? intermittent?), **For whom** (all users? specific?), **What is NOT
+the symptom** (adjacent things that work). Assess severity: data exposure → security-critical,
+financial impact → business-critical, data loss → data-integrity-critical, compliance (GDPR,
+SOC2, PCI-DSS) → note explicitly. Write `## Symptom` + `**Severity:**` into the report.
+
+#### Step 0a. Inventory tooling
+
+Check `investigations/tooling-inventory.md` first (template at `<skill-dir>/templates/tooling-inventory.md`).
+Determine: production DB, logs, metrics, tracing, error tracking, live API, config, queues,
+repo, CI/CD. Write `## Tooling` noting `direct` vs `inferred` per tool.
+
+#### Step 0b. Verify the symptom
+
+**S0-V — symptom verification required.** Confirm the symptom with at least one `direct` fact
+(production DB query, log, or live API observation) before Step 1. `interpreted` sources (reports,
+specs, prior investigations) must be re-verified against production.
+
+Make three sequential `mcp__hashharness__create_item` calls:
+
+1. **H0-1 (symptom-claimed anchor):** `item_type=HypothesisEvent`,
+   `links={"prevHyp": <Report v1 record_sha256>}`, `text` describes the symptom claim
+   (e.g., `event=symptom-claimed; the symptom is real and worth investigating`).
+
+2. **E1 (verifying evidence):** `item_type=Evidence`,
+   `links={"parentHypEvent": <H0-1 record_sha256>}`, `text` is the actual `direct` observation
+   (production DB result, log line, live API response).
+
+3. **Report v2:** `item_type=Report`, `links={"prevReport": <Report v1 record_sha256>}`,
+   `text` is the updated narrative now noting that the symptom is verified by E1.
+   Because `prevReport` declares `chain_predecessor: true`, the value MUST equal the
+   current Report-chain head; if a concurrent writer advanced the head, `create_item`
+   returns `head moved` — call `mcp__hashharness__find_tip(work_package_id, "Report")` and
+   retry. Reference E1's `text_sha256` in the prose for human readability.
+
+The hashharness server returns each item's `text_sha256` (storage key) AND `record_sha256`
+(link id) in the response. Use `record_sha256` for every `links` value and never invent or
+synthesize a hash. There is nothing to "do not edit" — the storage layer makes items immutable
+on creation, and `created_at` is server-stamped (callers cannot supply it).
+
+**S0-V.1 — Symptom proximity check.** If the symptom is transport-shaped (DNS failure,
+`gaierror`, connection refused, socket timeout, 5xx, health-check fail, "host not found"),
+the first hypothesis MUST include "target process never started or crashed during startup."
+Before investigating the transport layer, gather `direct` evidence of upstream liveness:
+startup logs, container state, readiness probe, process list. If that evidence is
+unavailable, Step 1 is observability (expose startup output), not topology.
+
+#### Step 1. Build the minimal model
+
+Uses `references/representation-menu.md` (the eight textual representation kinds). Check
+production logs/traces for the actual execution path before writing the model. Append findings
+to `evidence-log.md`.
+
+**Default: create a textual model AND record a hand walkthrough in the same step.** Building
+the model and walking it are one atomic step — a `.md` model file without a `Hand walkthrough:`
+field in `model-change-log.md` does NOT satisfy TC28. "Model exists but walkthrough deferred
+pending evidence" is NOT an allowed state.
+
+**Picking the representation.** Consult `references/representation-menu.md` and pick the
+smallest combination that captures the four model layers below. Typical minimum:
+- one **state machine** (#1) OR one **sequence diagram** (#2) for the causal layer, AND
+- one **invariant table** (#6) for the normative + data layers.
+The observability layer adds a third entry only when source-reliability or trace expectations
+are non-obvious. Larger investigations may use schemas (#4), DAGs (#3), decision tables (#5),
+type taxonomies (#7), or worked examples (#8) on top.
+
+**Walkthrough.** A hand walkthrough is a row-by-row pass through the invariant table (and any
+state-machine transition guards) against the evidence collected so far. For each row record
+one of: `pass` (evidence supports the rule), `fail` (evidence contradicts the rule — escalate
+to the hypothesis), `pending: <evidence needed>` (cannot evaluate yet — drives Step 4
+collection), or `n/a: <reason>` (rule does not apply to this hypothesis). The walkthrough
+goes into the `Hand walkthrough:` field of the M<N> entry.
+
+Consequences:
+- If constraints are too sparse to walk usefully (e.g., waiting for S0-V.1 liveness evidence),
+  do one of: (a) defer MODEL CREATION until Step 4 evidence arrives, (b) walk the sparse model
+  anyway — every row marked `pending` is still signal that narrows the hypothesis space, or
+  (c) propose a skip per the protocol below.
+- A walkthrough where every row is `pending` counts as a walk; record what evidence each row
+  needs. Partial walkthroughs satisfy TC28 when accompanied by a documented next step.
+- The M<N> entry MUST include the `Hand walkthrough:` field per the model-change-entry format.
+  An M1 entry without a walkthrough is a protocol violation caught by the termination gate.
+
+**Model skip — requires explicit user acknowledgement before writing the skip entry.**
+
+Protocol (MUST follow in order):
+1. Claude asks the user a single direct question: "Do you acknowledge skipping the textual
+   model? Here is what it would verify: `<X>`. Here are the edge cases narrative reasoning
+   misses: `<Y>`."
+2. Claude WAITS for a user message. Silence, "ok", "continue", or any non-response is NOT
+   acknowledgement. The reply must be an explicit affirmative ("yes, skip", "ack", "go ahead
+   without the model", etc.).
+3. ONLY after (2), Claude writes `M1: Skipped (user-acknowledged)` to `model-change-log.md`.
+   The entry MUST quote the user's verbatim acknowledgement string under an
+   `Acknowledgement:` field.
+4. If the user's reply is ambiguous, Claude re-asks. Claude does NOT infer acknowledgement
+   from context, priors, or prior sessions.
+
+Forbidden pattern: writing `M1: Skipped (user-acknowledged)` in the same turn that proposes
+the skip. The skip entry and the proposal MUST be in different turns separated by a user
+reply.
+
+Model only the **nearest causal layer**. Build four layers:
+1. **Normative** — business rule invariants, forbidden states, pre/postconditions
+2. **Data** — field constraints, valid/invalid combinations, stale derived data
+3. **Causal** — execution path to symptom, async/transaction boundaries, branch points
+4. **Observability** — expected traces per hypothesis, source reliability
+
+Append M1 to `model-change-log.md` with trigger, what was created (menu kinds + paths to the
+generated `.md` files under `investigations/<slug>/models/`), and the hand walkthrough.
+
+#### Step 2. Generate hypotheses
+
+Extract hypotheses from the model. Each **must** follow H1:
+`[condition] -> [mechanism] -> [state change] -> [symptom]`.
+For each, state the counterfactual (FZ1). Append `created`, `mechanism-stated`,
+`counterfactual-stated` entries to `hypothesis-log.md`.
+
+#### Step 3. Design distinguishing checks
+
+For each hypothesis pair: what check distinguishes them? **Strong** = confirms one, excludes
+another. **Weak** = compatible with multiple. Order by max information gain.
+
+#### Step 4. Collect facts
+
+Each fact gets a **reliability tag**:
+
+| Source | Reliability |
+|--------|-------------|
+| Production DB query | `direct` |
+| Production logs (<7d) | `direct` |
+| Production logs (>7d) | `inferred` |
+| Live API response | `direct` |
+| Deployed config / env vars | `direct` |
+| Repo code | `interpreted` |
+| Git history (local) | `interpreted` |
+| Prior reports / specs / docs | `interpreted` |
+| Textual model walkthrough | `inferred` |
+| User verbal description | `interpreted` |
+| Mobile app code | `unreliable-source` |
+| Third-party docs | `interpreted` |
+| User reports | `inferred` |
+
+**Repo code is not production truth.** Always tag code reading as `interpreted`.
+
+**F4** — Fix tasks: first fact must be `direct` production observation of current behavior.
+**F3** — Dynamic data: collect (1) current value, (2) change history, (3) timeline coverage.
+**F6** — Zero-result queries: list ALL sources, query each. Record `Absence sources: N/M`.
+**F7** — Wrong values: trace WRITE paths, not read. Record `Analysis type: write-path`.
+**F8** — Numeric discrepancy: compute exact locally before estimating. Record `Computation method`.
+**F9** — Snapshot fields: check temporality before trusting. Record `Field temporality`.
+**F10** — Baseline comparability: differential vs "last known good" requires same repo, trigger,
+and config. Record `Baseline: <id> | repo=X trigger=Y config-diff=Z`. Mismatched baseline = `interpreted`.
+**F11** — Workspace contamination: local/CI investigations must check for untracked/gitignored
+files that mask CI failure. Run `<skill-dir>/scripts/check_workspace_clean.sh [paths]` (which
+wraps `git ls-files --others --exclude-standard` + gitignored enumeration). Use `--source-only`
+to filter common source extensions when noise is high. Record `Workspace clean: yes/no` on
+evidence derived from local state.
+
+Append E<N> entries to `evidence-log.md` immediately as facts are gathered.
+
+#### Step 5. Update model with facts
+
+Add confirmed facts to the model — tighten state-machine guards, append rows to invariant
+tables, fill in schema fields, etc. Re-walk the affected invariant rows with the new evidence
+(every row that was `pending` and now has evidence must move to `pass` / `fail` / still
+`pending: <remaining gap>`). Append M<N> to `model-change-log.md` with the updated walkthrough.
+
+**Valid status transitions:**
+
+| From | Allowed transitions |
+|------|-------------------|
+| `active` | `compatible`, `weakened`, `rejected`, `undistinguished` |
+| `compatible` | `accepted`, `weakened`, `rejected`, `undistinguished` |
+| `weakened` | `rejected`, `compatible` |
+| `undistinguished` | `compatible`, `rejected` |
+| `rejected` | terminal — no transitions |
+| `accepted` | terminal — no transitions |
+
+Append `status-changed` entries to `hypothesis-log.md` with evidence reference.
+
+#### Step 6. Check diagnostic equivalence
+
+If hypotheses explain the same facts and predict the same for all checks — do NOT accept any,
+do NOT pick by "likelihood." Proceed to Step 7. Append `equivalence-checked` and
+`observability-assessed` (FZ2) entries to `hypothesis-log.md`.
+
+#### Step 7. Deepen the model
+
+Expand only where undistinguished hypotheses live. Directions: depth (code), depth (data),
+depth (type contracts — check types at call boundary when function returns default value),
+breadth (observability), breadth (concurrency). Append M<N>. Go back to Step 2.
+
+#### Step 8. Terminate or iterate
+
+**Termination conditions** (ALL must be true):
+
+1. Exactly one hypothesis `compatible` (U1)
+2. Has mechanism — causal chain (H1)
+3. Has counterfactual (H2/FZ1)
+4. Counterfactual observable with current telemetry (FZ2)
+5. Counterfactual verified absent against production
+6. No diagnostically equivalent alternatives (U1)
+7. Alternative mechanism considered (M2)
+8. All cause classes reviewed — Model Coverage filled (M1)
+9. `direct` evidence supports conclusion (PV1)
+10. No stale `direct` evidence (F5)
+11. Evidence log has ≥1 `direct` entry (PW1)
+12. Model re-run after last fact integration if built (PW2)
+13. `mechanism-stated` logged (PW3/H1)
+14. `counterfactual-stated` logged (PW3/H2)
+15. `observability-assessed` logged with "observable" (PW3/FZ2)
+16. `alternative-considered` logged (PW3/M2)
+17. `equivalence-checked` logged (PW3/U1)
+18. Status entries: one `compatible`/`accepted`, rest `rejected` (PW3/U1)
+19. First evidence in each production-first step is `direct`/`inferred` (TC19)
+20. Reliability tags match source classification table (F1)
+21. Status transitions follow valid transition table (no `rejected`→anything)
+22. Fix tasks: first S4 evidence is `direct` (F4)
+23. Dynamic data: evidence verifies current value + change history + timeline (F3)
+24. Absence claims: ALL sources queried, single-source = `inferred` (F6)
+25. Wrong values: write path identified, not just read path (F7)
+26. Numeric: exact computation if replicable; residual >5% blocks termination (F8)
+27. Snapshot fields: confirmed live for current-state use (F9)
+28. Textual model exists with a recorded `Hand walkthrough:` field (every invariant row marked `pass`/`fail`/`pending`/`n/a`), OR `M1: Skipped (user-acknowledged)` with an `Acknowledgement:` field quoting the user's verbatim affirmative reply from a turn AFTER the skip was proposed (PV2)
+29. Schema set, `work-package.md` created, and Report v1 created at Step 0 before any Step 0b/1/4 activity (PW0-init). `mcp__hashharness__get_schema` returns the four type definitions; `mcp__hashharness__get_work_package` returns Report v1 under the chosen `work_package_id`; `./investigations/<slug>/work-package.md` exists on disk pointing at the work package. No items of other types exist yet.
+30. Valid hashharness chain integrity (PW0-live). `mcp__hashharness__verify_chain` from the latest `HypothesisEvent` (or any tip item) returns `ok: true` for every reachable item. The server validates: (a) every item has a valid `text_sha256`/`meta_sha256`/`links_sha256`/`record_sha256`/`schema_sha256`/`schema_binding_sha256`; (b) every link references an existing item via that item's `record_sha256` (linking by `text_sha256` is rejected) and points to an item of the declared `target_types`; (c) every `citedEvidence` link's auto-derived `citedEvidenceHash` matches the sha256 of the sorted referenced `record_sha256`s; (d) Report/Hypothesis/Model chains follow valid type sequences via their respective `prev*` links, AND the Report chain's `prevReport` (declared `chain_predecessor: true`) matches the Report-chain head at write time (CAS-protected against forks).
+31. Transport-shaped symptom: upstream process liveness proven via `direct` evidence before transport investigation (S0-V.1)
+32. Differential evidence: baseline repo/trigger/config match the failing run (F10)
+33. Local/CI investigations: workspace contamination checked via `git status --ignored` (F11)
+34. No system change preceded `direct` evidence of the changed state (OB1)
+35. Every `rejected` hypothesis has a valid `Reason:` (evidence-based with `Evidence: E<N>`, or preference-based with an allowed `Priority:` + `Rationale:`) in its `status-changed` log entry (U2-doc)
+36. Single-record write discipline observed throughout the investigation (PW0-strict): each item was created by exactly one `mcp__hashharness__create_item` call; no multi-item batch helper was used; pre-write narration was present for each chain record (item type, intended links by hash, intended `text` and `title`).
+
+If any fails, iterate. Before acceptance, write an `alternative-considered` and a
+`status-changed` event file under `hypothesis/`. Assemble report: Symptom, Conclusion,
+Hypothesis History, Evidence Log, Hypothesis Log, Model Change Log, Model Coverage,
+Remaining Uncertainties, Next Steps. The report may reference the individual record files
+by name (e.g., "E1, E4, and H2-3 together rule out ...").
+
+---
+
+## Proof of work records
+
+PW1: ≥1 `Evidence` with `direct` reliability. PW2: ≥1 `ModelChange` if a
+model is built, re-run after fact integration. PW3: a `HypothesisEvent`
+for each TC13-18 lifecycle event. PW0-init is defined in Step 0.
+
+**PW0-live — agent obligations (storage handles the rest).**
+1. Use the right `item_type` + `links`; the server rejects wrong kinds at
+   `create_item` time.
+2. Link values are `record_sha256` of items that already exist (returned from a
+   prior `create_item` or fetched via `find_items`/`query_chain`/`find_tip`).
+   Never invent a hash. Linking by `text_sha256` is rejected by the server.
+3. `work_package_id` is consistent across all items in one investigation.
+4. At termination, `mcp__hashharness__verify_chain` on the latest tip returns
+   `ok: true` for every reachable item.
+
+**PW0-strict — single-create discipline.** The append-only storage closes the
+"delete the broken record" loophole automatically (storage refuses), but the
+batch-fix shortcut at the agent level is still possible: the agent could write
+a Python script that loops over `mcp__hashharness__create_item` calls. PW0-strict
+remains binding to prevent that.
+
+1. **One `create_item` per record.** Each H/E/M/Report item is created by exactly
+   one `mcp__hashharness__create_item` tool call. No script, loop, or helper that
+   issues multiple `create_item` calls in one pass.
+2. **No multi-item batch helpers.** It is NEVER acceptable to write a Bash/Python
+   script that creates multiple items, even for "fixups," even for setup, even
+   for "convenience."
+3. **Append-only is automatic — but don't try to work around it.** Storage
+   refuses rewrites. Don't propose deleting items from the data directory
+   directly to bypass storage. If a record is wrong, the only remedy is a
+   `Supersedes` link from a new item (see rule 5).
+4. **If `verify_chain` fails, repair item-by-item.** When verification reports
+   violations on multiple items, fix each with its own `create_item` call (or
+   `Supersedes` superseder). Do not write a script to "fix all the broken
+   ones at once." If a single-pass repair feels like the right move, that is
+   the signal PW0-strict is binding.
+5. **Supersedes mechanism for repairing broken state-changes.** A state-change
+   `HypothesisEvent` whose cited evidence has been semantically replaced (an
+   `Evidence` item that should no longer be the basis for a decision, possibly
+   because a more recent Evidence item supersedes its meaning) is repaired by
+   creating a NEW `HypothesisEvent` with `links={"supersedes": <broken-state-
+   change record_sha256>, "prevHyp": <latest H tip record_sha256>,
+   "citedEvidence": <fresh list of Evidence record_sha256s>}`.
+   The old item stays in storage as historical fact (storage immutability
+   guarantees this; deletion is not even possible).
+
+   `verify_chain` checks structural integrity only. The structural chain
+   stays valid by construction: `citedEvidenceHash` is auto-derived from
+   the current cited items, so it cannot drift from them. A state-change
+   only "becomes wrong" semantically — the agent or user decides the
+   citation is no longer the right basis. The fix is to append a
+   `Supersedes` superseder; the old item stays in storage as historical fact.
+
+6. **Cost is not a justification.** Permission prompts, tokens, round-trips
+   are costs the user accepts in exchange for integrity. "It's faster to do
+   this in one pass" is never a reason to violate the rules above.
+
+7. **Pre-create narration.** Before each `mcp__hashharness__create_item` call,
+   state in one sentence: the `item_type`, the `work_package_id`, the `links`
+   you intend to send (each as a label like "H0-1's text_sha256: <hex>"), and a
+   one-line summary of the `text` you will store. This narration is the audit
+   trail of construction discipline; skipping it is itself a PW0-strict
+   violation.
+
+The forbidden patterns:
+- Drafting all the items first then issuing many `create_item` calls in rapid
+  succession from a script. Even if the chain validates, this violates rule 1.
+- Manipulating the hashharness data directory directly to "clean up" or
+  "reset" mid-investigation. Storage is the source of truth; bypassing it
+  is forging the audit trail.
+- Treating storage immutability as license to skip pre-create narration.
+  Mechanical correctness ≠ deliberate construction.
+
+**Item shapes per type.** hashharness items carry `text` (prose narrative),
+`links` (typed references), AND `attributes` (a structured dict for queryable
+fields). Use `attributes` for anything you'd otherwise want to grep — event
+type, status values, reliability tags — and reserve `text` for the prose a
+human reviewer reads.
+
+`attributes` are JSON-serializable and included in the item's `meta_sha256`,
+so they're tamper-evident the same way the rest of the record is.
+
+- **Report**:
+  - `attributes`: `{"version": <int>, "step": "<step-id>", "severity":
+    "<level>"}` where `step` is one of `0`, `0b`, `4`, `7`, `8` (the step at
+    which this snapshot was made) and `severity` is one of
+    `security-critical`, `business-critical`, `data-integrity-critical`,
+    or `normal`.
+  - `text`: the narrative snapshot — Symptom, Tooling, findings, Conclusion.
+  - `links`: `{"prevReport": <prior report hash>}` for v2+; none for v1.
+
+- **HypothesisEvent**:
+  - `attributes`: `{"event": "<event-type>", "hypothesis_id": "H1",
+    "event_seq": <int>}` where `event` is one of `symptom-claimed | created |
+    mechanism-stated | counterfactual-stated | observability-assessed |
+    alternative-considered | status-changed | equivalence-checked | accepted`.
+    For `status-changed`, also include `"new_status": "<rejected|compatible|
+    weakened|undistinguished|accepted>"` and `"reason": "<evidence|preference>"`.
+    For `reason=preference`, also include `"priority": "<allowed-name>"` and
+    `"rationale": "<one-line text>"`.
+  - `text`: the prose content of the event — the hypothesis claim, the
+    mechanism, the counterfactual, the observation summary, the rationale
+    explanation. What a human would read to understand the reasoning.
+  - `links`: `{"prevHyp": <prior H or Report v1 hash>}`. For state-change
+    events add `"citedEvidence": [<E hash>, ...]`. To repair an earlier
+    state-change add `"supersedes": <broken H hash>`.
+
+- **Evidence**:
+  - `attributes`: `{"evidence_id": "E1", "source": "<source-name>",
+    "reliability": "<direct|inferred|interpreted|unreliable-source>"}`.
+    Plus optional F6-F9 audit fields when applicable: `"absence_sources":
+    "N/M"`, `"verdict": "..."`, `"analysis_type": "write-path"`,
+    `"producer_identified": true`, `"computation_method": "exact-local"`,
+    `"residual": "0%"`, `"field_temporality": "live|snapshot|scheduled"`,
+    `"last_written": "<iso>"`.
+  - `text`: the actual observation — query result, log line, value, raw
+    interpretation in prose.
+  - `links`: `{"parentHypEvent": <H event hash>}`.
+
+- **ModelChange**:
+  - `attributes`: `{"model_id": "M1", "step": <int>, "trigger":
+    "<initial|fact-integration|deepening|fix-verification|skip>",
+    "menu_kinds": ["state-machine"|"sequence-diagram"|"dag"|"schema"|"decision-table"|"invariant-table"|"type-taxonomy"|"worked-example"],
+    "walkthrough_summary": "<pass=N, fail=N, pending=N, n/a=N>"}`. For
+    `trigger=skip`, replace `menu_kinds` and `walkthrough_summary` with
+    `"acknowledgement": "<verbatim user reply>"`.
+  - `text`: what changed in the model, optionally embedded Mermaid /
+    YAML / Markdown-table snippets, plus the row-by-row hand walkthrough
+    against current evidence.
+  - `links`: `{"prevModel": <prior M hash, or Report v1 for the first M>,
+    "parentHypEvent": <triggering H hash>}`. Both links are required —
+    `prevModel` chains model history; `parentHypEvent` attaches the
+    iteration to the hypothesis that triggered it.
+
+The protocol checkers (e.g., `scripts/check_rejection_reasons.py`) read from
+`attributes` directly. Putting structured fields in `attributes` instead of
+hand-parsed `text` makes the integrity binding stronger (any later edit would
+change `meta_sha256`) and the queries faster.
+
+**F5 staleness:** `direct` evidence goes stale after deploy/migration. Re-verify
+before acceptance. Re-verification means creating a NEW Evidence item linked to
+the same parent (or to a fresher hypothesis event if appropriate); the old
+Evidence item stays in storage as the historical observation.
+
+Pre-acceptance check: re-read the Step 8 termination conditions (TC1-36)
+and confirm each. `scripts/audit.py <work_package_id>` runs the
+mechanical subset (TC30 chain integrity + TC35 rejection-schema) against
+the live store; the rest are content-level checks the agent must verify
+by inspection.
+
+---
+
+## Protocol rules
+
+**H1** — Every hypothesis: `[condition] -> [mechanism] -> [state change] -> [symptom]`.
+**H2** — State what observation would make it false. No counterfactual = too vague.
+**T1** — Every check: which hypotheses does it distinguish? Compatible with all = zero value.
+**U1** — Accept only if no other hypothesis is compatible. If undistinguished → deepen, don't pick.
+**U2** — Multiple compatible hypotheses: keep all active, do not collapse.
+**U2-doc** — Every `status-changed` entry to `rejected` MUST carry a `Reason:` field:
+`Reason: evidence` + `Evidence: E<N>` (cite the specific entry) OR
+`Reason: preference` + `Priority: <name>` + `Rationale: <text>`.
+Allowed `Priority:` values: `Occam`, `BlastRadius`, `Severity`, `RecencyOfDeploy`,
+`Reproducibility`, `FixCost`. Any other priority must be raised to the user first.
+**M2** — Before accepting, name ≥1 alternative mechanism.
+
+**M1 — blind spot checklist** (all must be reviewed before acceptance):
+Concurrency, Shared mutable state, Object lifecycle, Caching, Async boundaries,
+External systems, Partial observability, Config/feature flags, Data migration,
+Tenant isolation, Auth state, Deployment drift, Multi-artifact versions, Build pipeline divergence.
+
+**F1** — Tag every fact by source reliability. Never tag `interpreted` as `direct`.
+**F2** — Absence ≠ evidence of absence. Could it be absent from your view but present in production?
+**F3** — Dynamic data: check (1) current value, (2) change history, (3) timeline coverage.
+**F6** — Zero-result query: list ALL sources, query each. Conclude absence only when all agree.
+**F7** — Wrong value: trace WRITE paths (INSERT/UPDATE), not read paths. Match value to producer.
+**F8** — Numeric discrepancy: compute exact locally before estimating. Residual >5% = compute instead.
+**F9** — DB field as current state: check temporality (live/snapshot/scheduled). Snapshot = `inferred`.
+**F10** — Baseline comparability: differential requires matching repo/trigger/config. Record the diff.
+**F11** — Workspace contamination: check `git status --ignored` + `git ls-files --others` on local/CI mixes.
+**OB1** — Observability before intervention. Don't change topology/config/code under investigation
+until you have `direct` evidence of the state being changed. Blind intervention moves the target.
+**PW0-strict** — One `Write` per record, with fresh `Bash` calls for time and predecessor hash.
+No multi-file write/repair helpers. If a checker fails, fix each affected file individually with
+a new `Bash` + `Write` per file — do NOT write a script that batches the fix. Cost (tokens,
+prompts, round-trips) is not a justification. Pre-write narration: state file, Timestamp,
+PrevHash before each Write.
+**PV1** — ≥1 `direct` fact must support acceptance. Code reading alone is insufficient.
+**PV2** — Textual model required. Skip requires: (a) Claude asked, (b) user replied affirmatively in a later turn, (c) the user's verbatim reply is quoted in the skip entry. Inferring acknowledgement from silence, prior preferences, or memory is forbidden.
+**FZ1** — State counterfactual for each hypothesis.
+**FZ2** — Unobservable counterfactual blocks acceptance. Deepen observability, don't assume true.
+**FM1** — ≥1 `direct` fact before building model. Sequence: verify → code → hypothesize → model → walk → verify fix.
+
+---
+
+## Practical guidance
+
+- **Always model.** A 10-row state machine + 5-row invariant table beats 2000 words of prose. Start small, grow on demand. Pick from `references/representation-menu.md`.
+- **Facts > structure.** One reliable fact eliminating a hypothesis class beats an elaborate model.
+- **Name hypotheses consistently** (H1, H2, H3). Track rejections — they prove thoroughness.
+- **User prompts are high-value checks.** Execute them immediately — the user's domain intuition
+  targets blind spots the protocol misses. After each major conclusion, ask: "What would the user
+  check that I haven't?"
+- **Observe before reasoning.** Compute exact values (F8), query all tables (F6), trace write
+  paths (F7), verify field liveness (F9) — don't reason where you can observe.
+
+## Bundled files
+
+- `references/representation-menu.md` — The eight textual representation kinds (state
+  machine, sequence diagram, DAG, schema, decision table, invariant table, type taxonomy,
+  worked example). Read at Step 1 to pick the right combination for the investigation's
+  model. Source of truth for `attributes.menu_kinds` values in ModelChange items.
+- `templates/tooling-inventory.md` — Template for tooling inventory. Copy into the project's
+  `investigations/` directory and fill in. The skill reads it at Step 0a to avoid
+  re-enumerating tools each investigation.
+
+The MCP tools the wrapper scripts use are the same set listed at Step 0;
+no need to repeat them here.
+
+**Token-efficient wrapper scripts.** Direct `mcp__hashharness__create_item`
+calls from the agent are verbose — both the request and response carry the
+full item content. To cut token cost, the skill ships per-record bash-style
+wrapper scripts that translate CLI args to MCP HTTP calls and return ONLY
+the new `text_sha256`. They talk to hashharness purely through the MCP HTTP
+API (no direct storage import), keeping the agent on the protocol surface.
+
+**Setup (once per machine):**
+
+Run hashharness as a long-running HTTP MCP server (separate terminal or
+launchd/systemd service):
+
+```
+HASHHARNESS_MCP_TRANSPORT=http \
+HASHHARNESS_HTTP_PORT=8765 \
+HASHHARNESS_DATA_DIR=$HOME/workspace/hashharness/data \
+python3 -m hashharness.mcp_server
+```
+
+The wrapper scripts default to `http://127.0.0.1:8765/mcp`; override with
+`HASHHARNESS_HTTP_URL`. To avoid races with a separate stdio MCP server
+spawned by Claude Code, point both transports at the same data dir but only
+run one at a time, OR configure Claude Code's MCP to use HTTP transport
+against this same server.
+
+**Wrapper scripts (one create_item per invocation — preserves PW0-strict):**
+
+- `scripts/record_report.py` — create one Report. Args:
+  `--version`, `--step`, `--severity`, `--title`, `--text`,
+  `[--prev-report <hash>]`. Stdout: new `text_sha256`.
+- `scripts/record_h_event.py` — create one HypothesisEvent. Args:
+  `--event`, `--hypothesis-id`, `--event-seq`, `--prev-hyp`, `--title`,
+  `--text`, plus optional `--cited-evidence`, `--supersedes`, `--new-status`,
+  `--reason`, `--priority`, `--rationale`.
+- `scripts/record_evidence.py` — create one Evidence. Args:
+  `--evidence-id`, `--source`, `--reliability`, `--parent-hyp-event`,
+  `--title`, `--text`, plus F6-F9 audit fields.
+- `scripts/record_model_change.py` — create one ModelChange. Args:
+  `--model-id`, `--step`, `--trigger`, `--menu-kinds`,
+  `--walkthrough-summary`, `--prev-model`, `--parent-hyp-event`, `--title`,
+  `--text`, optional `--acknowledgement` (for `--trigger=skip`; replaces
+  `--menu-kinds` and `--walkthrough-summary`).
+- `scripts/audit.py <work_package_id>` — pre-acceptance summary.
+  Combines `verify_chain` (TC30) + `check_rejection_reasons` (TC35) into a
+  single concise output. Returns exit 0 if all checks pass.
+- `scripts/materialize.py <work_package_id> <output-dir>` — render the four
+  human-readable markdown views (`investigation-report.md`, `evidence-log.md`,
+  `hypothesis-log.md`, `model-change-log.md`) from the hashharness store via
+  `get_work_package`. The canonical implementation of the materialization
+  protocol — use this rather than hand-rolling. Files are rewritten from
+  scratch each run; they are derived views, not the source of truth.
+- `scripts/check_rejection_reasons.py <work_package_id>` — TC35/U2-doc
+  enforcement on its own. Queries the store via MCP HTTP, reads each
+  rejection's structured `attributes`, validates the schema.
+- `scripts/check_workspace_clean.sh [paths...]` — TC33/F11 enforcement.
+  F11 is a filesystem concern in the dev workspace, independent of
+  hashharness.
+
+**PW0-strict (rule 1) is preserved:** each script invocation is exactly one
+`create_item` over the wire — no batching. The fact that the script is
+shorter than the equivalent direct MCP call doesn't make it "less of a
+write." Pre-create narration (rule 7) still applies: state intent before
+each `Bash` invocation.
+
+**Falling back to direct MCP tools.** If the HTTP server is not running, or
+for ad-hoc queries (e.g., one-off `find_items` to navigate a chain), use
+the `mcp__hashharness__*` tools directly. The wrappers are an
+optimization, not a replacement.
+
+Hashing is internal to hashharness; do not compute hashes locally.
