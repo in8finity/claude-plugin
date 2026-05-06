@@ -1,5 +1,7 @@
 module fdp_temporal_core
 
+open shared/fdp_core
+
 /*
  * Segment 5: Temporal Core (Lean)
  *
@@ -15,36 +17,12 @@ module fdp_temporal_core
  *     Justified by: fdp_source_classification.als, fdp_fact_ordering.als
  *
  * Net reduction: 7 fewer Boolean state variables = ~128x smaller state space.
+ *
+ * Shared enums (Bool, Step, HStatus, Reliability, DiagStrength, CauseClass)
+ * imported from fdp_core. TaskType, SourceType, sourceReliability are also
+ * imported (defined in fdp_core for use by fdp_protocol.als) but unused here
+ * because F3/F4 are proved in their own segments.
  */
-
--- ============================================================
--- Domain enums
--- ============================================================
-
-abstract sig Bool {}
-one sig True, False extends Bool {}
-
-abstract sig Step {}
-one sig S0_Symptom, S1_Model, S2_Hypotheses, S3_Checks,
-        S4_Facts, S5_Update, S6_Equivalence, S7_Deepen,
-        S8_Terminate extends Step {}
-
-abstract sig HStatus {}
-one sig Active, Rejected, Weakened, Compatible, Undistinguished, Accepted extends HStatus {}
-
-abstract sig Reliability {}
-one sig Direct, Inferred, Interpreted, UnreliableSource extends Reliability {}
-
-abstract sig DiagStrength {}
-one sig Strong, Weak, Irrelevant extends DiagStrength {}
-
--- M1: 14 cause classes
-abstract sig CauseClass {}
-one sig CC_Concurrency, CC_SharedMutableState, CC_ObjectLifecycle, CC_Caching,
-        CC_AsyncBoundaries, CC_ExternalSystem, CC_PartialObservability,
-        CC_ConfigFeatureFlags, CC_DataMigration, CC_TenantIsolation,
-        CC_AuthState, CC_DeploymentDrift, CC_MultiArtifact, CC_BuildPipeline
-  extends CauseClass {}
 
 -- ============================================================
 -- Core entities (reduced var fields)
@@ -264,9 +242,11 @@ pred reverifyFact[f: Fact] {
   frameInvestigation
 }
 
--- PW0-init/TC29: create the four log files (evidence-log, hypothesis-log,
--- model-change-log, investigation-report) before any other Step 0 action.
--- Monotonic: once created, stays created.
+-- PW0-init/TC29: initialize the investigation's record store before any
+-- other Step 0 action. Filesystem variant: create the four log files
+-- (evidence-log, hypothesis-log, model-change-log, investigation-report).
+-- Harness variant: set the hashharness schema, create the work-package
+-- marker, and create Report v1. Monotonic: once initialized, stays initialized.
 pred createStubs {
   Investigation.currentStep = S0_Symptom
   Investigation.stubFilesCreated = False

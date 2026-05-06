@@ -52,81 +52,24 @@ module FormalDebuggerProtocol
  *   - M1 cause classes abstracted to a boolean (the 14-class enum lives in
  *     the Dafny model as `causeClassesCovered`)
  *   - Hash chain integrity and per-record structure (TC30) modeled in
- *     fdp_structured_chain.als, not here
- *   - Versioned reports (investigation-report-<N>_*.md) modeled in
- *     fdp_structured_chain.als and the Dafny ReportRecord datatype
+ *     canonical/fdp_structured_chain.als (filesystem variant) and
+ *     harness/fdp_storage_chain.als (hashharness MCP variant)
+ *   - Versioned Report items modeled alongside TC30 in the variant-specific
+ *     chain models above and the Dafny ReportRecord datatype
  *   - Tightened skip protocol (verbatim Acknowledgement, later-turn entry)
  *     modeled in fdp_skip_protocol.als
  */
 
 -- ============================================================
--- Domain enums
+-- Domain enums (imported from fdp_core)
 -- ============================================================
 
-abstract sig Bool {}
-one sig True, False extends Bool {}
-
--- Investigation steps (outer loop)
-abstract sig Step {}
-one sig S0_Symptom, S1_Model, S2_Hypotheses, S3_Checks,
-        S4_Facts, S5_Update, S6_Equivalence, S7_Deepen,
-        S8_Terminate extends Step {}
-
--- Hypothesis status
-abstract sig HStatus {}
-one sig Active, Rejected, Weakened, Compatible, Undistinguished, Accepted extends HStatus {}
-
--- Fact reliability
-abstract sig Reliability {}
-one sig Direct, Inferred, Interpreted, UnreliableSource extends Reliability {}
-
--- Diagnostic strength of a check
-abstract sig DiagStrength {}
-one sig Strong, Weak, Irrelevant extends DiagStrength {}
-
--- F4: task type determines whether production-first ordering applies
-abstract sig TaskType {}
-one sig Investigate, Fix extends TaskType {}
-
--- M1: 14 cause classes from the blind-spot checklist (SKILL.md)
--- Each must be explicitly covered (or excluded with reason) before acceptance.
-abstract sig CauseClass {}
-one sig CC_Concurrency, CC_SharedMutableState, CC_ObjectLifecycle, CC_Caching,
-        CC_AsyncBoundaries, CC_ExternalSystem, CC_PartialObservability,
-        CC_ConfigFeatureFlags, CC_DataMigration, CC_TenantIsolation,
-        CC_AuthState, CC_DeploymentDrift, CC_MultiArtifact, CC_BuildPipeline
-  extends CauseClass {}
-
--- F3: source types with prescribed reliability levels (SKILL.md lines 178-193)
-abstract sig SourceType {}
-one sig ProductionDB,             -- direct
-        RecentProductionLogs,     -- direct  (<7d)
-        OldProductionLogs,        -- inferred (>7d)
-        LiveAPIResponse,          -- direct
-        DeployedConfig,           -- direct
-        RepoCode,                 -- interpreted
-        LocalGitHistory,          -- interpreted
-        PriorReport,              -- interpreted
-        SpecDesignDoc,            -- interpreted
-        AlloyModelResult,         -- inferred
-        UserVerbalDescription,    -- interpreted
-        MobileAppCode,            -- unreliable-source
-        ThirdPartyDocs,           -- interpreted
-        UserReport                -- inferred
-  extends SourceType {}
-
--- F3: the classification function — encodes the source→reliability table
-fun sourceReliability[s: SourceType]: one Reliability {
-  s in (ProductionDB + RecentProductionLogs + LiveAPIResponse + DeployedConfig)
-    => Direct
-  else s in (OldProductionLogs + AlloyModelResult + UserReport)
-    => Inferred
-  else s in (RepoCode + LocalGitHistory + PriorReport + SpecDesignDoc
-             + UserVerbalDescription + ThirdPartyDocs)
-    => Interpreted
-  else  -- MobileAppCode
-    UnreliableSource
-}
+open shared/fdp_core
+-- Imports: Bool/True/False, Step (S0-S8), HStatus, Reliability, DiagStrength,
+-- TaskType, CauseClass (14), SourceType (14), sourceReliability function.
+-- Sigs (Hypothesis, Fact, Check, Investigation) are defined below — they
+-- carry the monolith's full state-rich shape; the leaner shape lives in
+-- fdp_temporal_core.als.
 
 -- ============================================================
 -- Core entities
@@ -1053,31 +996,12 @@ assert F5_NoStaleEvidenceAtAcceptance {
 }
 check F5_NoStaleEvidenceAtAcceptance for 4 but 2 Hypothesis, 2 Fact, 1 Check, 14 steps
 
--- F4: in Fix tasks, the first fact collected at S4 must be Direct (production)
-assert F4_FixTaskProductionFirst {
-  always (
-    (Investigation.taskType = Fix
-     and Investigation.currentStep = S4_Facts
-     and Investigation.firstS4FactCollected = False
-     and Investigation.firstS4FactCollected' = True)
-    =>
-    (some f: Fact | f.integrated = False and f.integrated' = True and f.reliability = Direct)
-  )
-}
-check F4_FixTaskProductionFirst for 4 but 2 Hypothesis, 3 Fact, 2 Check, 12 steps
-
--- TC19: first S4 fact must be production-grade (Direct or Inferred) for all tasks
-assert TC19_ProductionFirstOrdering {
-  always (
-    (Investigation.currentStep = S4_Facts
-     and Investigation.firstS4FactCollected = False
-     and Investigation.firstS4FactCollected' = True)
-    =>
-    (some f: Fact | f.integrated = False and f.integrated' = True
-                    and f.reliability in (Direct + Inferred))
-  )
-}
-check TC19_ProductionFirstOrdering for 4 but 2 Hypothesis, 3 Fact, 2 Check, 12 steps
+-- F4 (Fix-task production-first) and TC19 (universal production-first) — moved
+-- out of the monolith. Both are proved at the dedicated segment level by
+-- fdp_fact_ordering.als (6 assertions, 2 runs) which models the relevant
+-- ordering with smaller state. Keeping them here added solver cost without
+-- adding coverage. See system-models/reports/formal-debugger-reconciliation.md
+-- (2026-05-05) for the audit trail.
 
 -- TC19 consequence: Investigate tasks can no longer start with Interpreted evidence.
 -- (Before TC19, F4 only constrained Fix tasks. Now all tasks require production-first.)
@@ -1089,23 +1013,11 @@ run InvestigateInterpretedAfterFirst {
     and eventually (f.integrated = True)
 } for 4 but exactly 2 Hypothesis, exactly 2 Fact, exactly 1 Check, 16 steps
 
--- F3: reliability is always consistent with source type
-assert F3_ReliabilityConsistent {
-  always (all f: Fact | f.reliability = sourceReliability[f.source])
-}
-check F3_ReliabilityConsistent for 4 but 3 Hypothesis, 3 Fact, 4 Check, 10 steps
-
--- F3 consequence: integrating a repo-code fact cannot set hasProductionEvidence
--- (the flag only changes to True when a Direct fact is integrated)
-assert F3_RepoCodeCantSetProductionEvidence {
-  always (
-    (some f: Fact | f.source = RepoCode and f.integrated = False and f.integrated' = True)
-    =>
-    (Investigation.hasProductionEvidence' = Investigation.hasProductionEvidence
-     or Investigation.hasProductionEvidence = True)  -- either unchanged or was already true
-  )
-}
-check F3_RepoCodeCantSetProductionEvidence for 4 but 2 Hypothesis, 3 Fact, 2 Check, 10 steps
+-- F3 (reliability consistency, repo-code cannot set production-evidence) — moved out.
+-- The reliability=sourceReliability[source] constraint stays live as the
+-- F3_ReliabilityMatchesSource fact above; the redundant assert was just
+-- restating it. Source-classification properties are proved in
+-- fdp_source_classification.als (9 assertions, 2 runs).
 
 -- FZ2: counterfactual can only be verified if it's observable
 -- (unobservable counterfactual = blind spot, not confirmation)
@@ -1128,78 +1040,31 @@ assert CounterfactualMustBeVerified {
 }
 check CounterfactualMustBeVerified for 4 but 3 Hypothesis, 3 Fact, 4 Check, 10 steps
 
--- Combined: the full acceptance gate (all 24 termination conditions from SKILL.md)
--- TC19 (production-first) is enforced structurally in integrateFact.
--- TC20-22 (F1, transitions, F4) are enforced structurally in other predicates.
-assert FullAcceptanceGate {
-  always (all h: Hypothesis | h.status' = Accepted => (
-    -- Protocol rules (TC1-TC9)
-    h.hasMechanism = True                                                      -- TC2/H1
-    and h.hasCounterfactual = True                                              -- TC3/H2
-    and h.counterfactualObservable = True                                       -- TC4/FZ2
-    and h.counterfactualVerified = True                                         -- TC5
-    and h.alternativeConsidered = True                                          -- TC7/M2
-    and CauseClass = Investigation.causesCovered                                -- TC8/M1
-    and Investigation.hasProductionEvidence = True                              -- TC9/PV1
-    and no h2: Hypothesis - h | h2.status in (Compatible + Undistinguished + Active)  -- TC1+TC6+TC18
-    -- Evidence quality (TC10)
-    and no f: Fact | f.integrated = True and f.reliability = Direct and f.stale = True  -- TC10/F5
-    -- Proof of work (TC11-TC17)
-    and Investigation.evidenceLogHasDirect = True                               -- TC11/PW1
-    and (Investigation.modelBuilt = True => Investigation.modelRerunAfterFacts = True)  -- TC12/PW2
-    and h.loggedMechanism = True                                                -- TC13/PW3
-    and h.loggedCounterfactual = True                                           -- TC14/PW3
-    and h.loggedObservability = True                                            -- TC15/PW3
-    and h.loggedAlternative = True                                              -- TC16/PW3
-    and Investigation.equivalenceChecked = True                                 -- TC17/PW3
-    -- TC23: F3 data-input verification (if dynamic data dependent)
-    and ((h.dynamicDataDependent = True) => (
-      h.dataCurrentValueVerified = True
-      and h.dataChangeHistoryVerified = True
-      and h.dataTimelineCoverageVerified = True
-    ))
-    -- TC24: formal model exists OR user-acknowledged skip
-    and (Investigation.modelBuilt = True or Investigation.skipAcknowledged = True)
-    -- TC24 corollary: skip requires proposal (no silent skip)
-    and (Investigation.skipAcknowledged = True => Investigation.skipProposed = True)
-  ))
-}
-check FullAcceptanceGate for 4 but 2 Hypothesis, 2 Fact, 2 Check, 14 steps
-
--- TC23: F3 data-input verification — if hypothesis depends on dynamic data,
--- all three checks must be completed before acceptance
-assert TC23_DynamicDataVerified {
-  always (all h: Hypothesis | h.status' = Accepted =>
-    ((h.dynamicDataDependent = True) => (
-      h.dataCurrentValueVerified = True
-      and h.dataChangeHistoryVerified = True
-      and h.dataTimelineCoverageVerified = True
-    )))
-}
-check TC23_DynamicDataVerified for 4 but 2 Hypothesis, 2 Fact, 2 Check, 10 steps
-
--- TC23 consequence: a non-dynamic-data hypothesis can be accepted even with
--- data verification flags at False (F3 gate is vacuously satisfied)
-run TC23_NoDynamicDataCanAccept {
-  some h: Hypothesis |
-    h.dynamicDataDependent = False
-    and h.dataCurrentValueVerified = False
-    and eventually (h.status = Accepted)
-} for 4 but exactly 2 Hypothesis, exactly 1 Fact, 1 Check, 28 steps
-
--- TC24: formal model or acknowledged skip required for acceptance
-assert TC24_FormalModelOrSkip {
-  always (all h: Hypothesis | h.status' = Accepted =>
-    (Investigation.modelBuilt = True or Investigation.skipAcknowledged = True))
-}
-check TC24_FormalModelOrSkip for 4 but 2 Hypothesis, 2 Fact, 2 Check, 10 steps
-
--- TC24 corollary: skip without proposal is impossible
-assert TC24_NoSilentSkip {
-  always (all h: Hypothesis | h.status' = Accepted =>
-    (Investigation.skipAcknowledged = True => Investigation.skipProposed = True))
-}
-check TC24_NoSilentSkip for 4 but 2 Hypothesis, 2 Fact, 2 Check, 10 steps
+-- ============================================================
+-- Removed integration-scope assertions — proved elsewhere
+-- ============================================================
+--
+-- The following compound integration assertions used to live here. They
+-- caused the SAT problem to blow up beyond the default 1g JVM heap and
+-- still didn't fit in 4g. Removed 2026-05-05; equivalent properties are
+-- proved at finer granularity in segments and unboundedly in Dafny.
+--
+--   - FullAcceptanceGate (24-condition compound at scope `4 but 2H/2F/2C/14
+--     steps`) — equivalent to Dafny `canTerminate` / `extendedCanTerminate`
+--     in fdp_protocol.dfy (proved unbounded). Each conjunct of the gate is
+--     also proved individually by the surviving asserts above (TC2/H1, TC3/H2,
+--     TC4/FZ2, TC5, TC7/M2, TC8/M1, TC9/PV1, TC10/F5, TC11/PW1, TC12/PW2,
+--     TC13-17/PW3) and by segments (TC23 in fdp_dynamic_data, TC24 in
+--     fdp_skip_protocol).
+--
+--   - TC23_DynamicDataVerified + TC23_NoDynamicDataCanAccept — proved in
+--     fdp_dynamic_data.als (7 assertions, 3 runs).
+--
+--   - TC24_FormalModelOrSkip + TC24_NoSilentSkip — proved in
+--     fdp_skip_protocol.als (8 assertions, 3 runs).
+--
+-- See system-models/reports/formal-debugger-reconciliation.md (2026-05-05)
+-- for the audit trail.
 
 -- F1/PV1 combined: interpreted-only evidence cannot lead to acceptance
 -- (if no Direct fact is integrated, hasProductionEvidence stays False)
@@ -1313,9 +1178,13 @@ run EquivalenceForcesDeepening {
 --       + later-turn entry). Three-step propose → acknowledge → writeSkipEntry
 --       protocol with 8 safety assertions.
 --   - fdp_temporal_core.als: TC29 (PW0-init stub layout before Step 0a)
---   - fdp_structured_chain.als: TC30 (PW0-live) — the four-chain model:
---       report chain, hypothesis chain, evidence parent links, model chain,
---       plus state-change EvidenceHash binding.
+--   - canonical/fdp_structured_chain.als: TC30 (PW0-live, filesystem variant)
+--       — the four-chain model: Report chain, hypothesis chain, evidence
+--       parent links, model chain, plus state-change citedEvidence/EvidenceHash
+--       binding.
+--   - harness/fdp_storage_chain.als: TC30 (PW0-live, hashharness MCP variant)
+--       — same four chains expressed via schema link rules with target_types,
+--       server-derived citedEvidenceHash, and immutable items.
 --   - fdp_symptom_proximity.als: TC31 (S0-V.1 transport-shaped liveness)
 --   - fdp_baseline_comparability.als: TC32 (F10 baseline match on repo/
 --       trigger/config)

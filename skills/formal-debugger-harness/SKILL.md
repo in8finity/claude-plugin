@@ -33,15 +33,29 @@ append-only hash-chained text storage). All records — reports, hypothesis
 events, evidence, model changes — are created through MCP tool calls.
 
 The MCP tools are:
-- `mcp__hashharness__set_schema` — declare item types and link rules (once per environment)
-- `mcp__hashharness__get_schema` — read the current schema
-- `mcp__hashharness__create_item` — create a new immutable item
+- `mcp__hashharness__set_schema` — declare item types and link rules; CAS-protected,
+  versioned (pass `expected_prev` = current schema head's `record_sha256` when updating;
+  omit on initial set). Each accepted item is bound to the schema head as of its write time.
+- `mcp__hashharness__get_schema` — read the current schema (or pass `at=<schema record_sha256>`
+  for a historical version)
+- `mcp__hashharness__get_schema_history` — full genesis-to-head schema chain (audit)
+- `mcp__hashharness__get_schema_version` — fetch one schema version by its `record_sha256`
+- `mcp__hashharness__create_item` — create a new immutable item; `created_at` is
+  server-stamped and rejected if caller-supplied
 - `mcp__hashharness__find_items` — search by `text`, `title`, `work_package_id`, or `all`
-- `mcp__hashharness__get_item_by_hash` — fetch by `text_sha256`
+- `mcp__hashharness__get_item_by_hash` — fetch by `text_sha256` (the storage key)
 - `mcp__hashharness__get_work_package` — fetch all items for one exact `work_package_id`
   (the canonical read path for the materialization protocol — see below)
+- `mcp__hashharness__find_tip` — current head of a chain for one (work_package_id,
+  item_type) pair. Use before writing into a chain that declares `chain_predecessor: true`.
+- `mcp__hashharness__find_tips_bulk` — batched `find_tip` for multiple chains in one call
 - `mcp__hashharness__query_chain` — walk all referenced items transitively from a root
 - `mcp__hashharness__verify_chain` — recompute and validate every hash in the reachable graph
+
+**Inter-item links reference `record_sha256`.** `text_sha256` is the storage key — use it
+with `get_item_by_hash` and quote it in prose for human readability. Every value under
+`links` must be the target item's `record_sha256` (the hash of text + metadata + links
+combined). The server rejects `create_item` calls whose link values are `text_sha256`s.
 
 Each investigation gets a unique `work_package_id` (kebab-case from the symptom, e.g.,
 `webhook-drops-2pct`). All items for that investigation carry that `work_package_id` in
@@ -69,7 +83,7 @@ Item types and links (set once via `set_schema` with this payload):
   "types": {
     "Report": {
       "links": {
-        "prevReport": {"kind": "single", "target_types": ["Report"]}
+        "prevReport": {"kind": "single", "target_types": ["Report"], "chain_predecessor": true}
       }
     },
     "HypothesisEvent": {
@@ -94,6 +108,18 @@ Item types and links (set once via `set_schema` with this payload):
 }
 ```
 
+**Why `chain_predecessor` is on `prevReport` only.** The hashharness server's
+`chain_predecessor: true` flag enables compare-and-swap on a per-(work_package_id, item_type)
+head: the first item must omit the predecessor link, subsequent items must reference the
+current head. This aligns cleanly with `prevReport` (Report v1 omits, v2 → v1, v3 → v2). It
+does NOT align with `prevHyp` / `prevModel`, where the schema's `target_types` deliberately
+allow anchoring on Report v1 (so the first H of a chain says `prevHyp = Report-v1-record-sha`
+rather than omitting). Choosing chain-CAS protection there would require dropping the
+explicit Report-v1 anchor and relying on tip-discovery instead. We keep the explicit anchor
+because it makes the chain genesis legible in the materialized log; protection against
+concurrent-fork relies on the single-writer assumption (one Claude instance per investigation).
+A future schema revision could split anchoring from chain order via two separate links.
+
 **Materialization protocol for readable logs.** Regenerate the four log markdown files
 only when one of these is true:
 - the user asks for clarification, status, or a human-readable summary
@@ -104,7 +130,8 @@ When that happens:
 1. Call `mcp__hashharness__get_work_package` for the active `work_package_id`. Optional
    per-type `find_items` calls are allowed for formatting, but the canonical read path is
    `get_work_package`.
-2. Sort returned items by `created_at` (tie-break by `stored_at`, then `text_sha256`).
+2. Sort returned items by `created_at` (server-stamped, monotonic; tie-break by
+   `text_sha256`).
 3. Rewrite `investigation-report.md`, `evidence-log.md`, `hypothesis-log.md`, and
    `model-change-log.md` from scratch — these are derived views, not append-only.
 4. Start each generated file with a header containing: `Generated from hashharness via
@@ -131,15 +158,19 @@ rule consistent from the very first evidence.
 
 **Blocking precondition (PW0-init).** Before proceeding to Step 0a, Claude MUST:
 1. Verify the schema is set via `mcp__hashharness__get_schema`. If empty, call
-   `mcp__hashharness__set_schema` with the payload above. (This is normally a one-time
-   environment setup, but verify per-investigation.)
+   `mcp__hashharness__set_schema` with the payload above (omit `expected_prev` on initial
+   set; pass `expected_prev=<current schema head record_sha256>` if updating later).
+   This is normally a one-time environment setup, but verify per-investigation. If
+   `mcp__hashharness__get_schema_history` returns more than one version, audit-trail
+   readers should fetch each item's `schema_sha256` to validate against the as-of schema.
 2. Choose a `work_package_id` and a `slug` (kebab-case from symptom). Create
    `./investigations/<slug>/` and write `work-package.md` with: the `slug`,
-   `work_package_id`, symptom sketch, and a placeholder for Report v1's hash.
+   `work_package_id`, symptom sketch, and placeholders for Report v1's `text_sha256`
+   (the storage key) and `record_sha256` (the link id used for `prevReport`).
 3. Create Report v1 via `mcp__hashharness__create_item` with `item_type=Report`, no
-   `prevReport` link, and the symptom sketch as the `text`. Update `work-package.md`
-   with the returned `text_sha256`.
-4. Show the user the resulting `text_sha256` of Report v1 AND the path to
+   `prevReport` link, and the symptom sketch as the `text`. The server stamps `created_at`;
+   do not supply it. Update `work-package.md` with the returned `text_sha256` and `record_sha256`.
+4. Show the user the resulting `text_sha256` AND `record_sha256` of Report v1 AND the path to
    `./investigations/<slug>/work-package.md`.
 
 Claude MUST NOT collect evidence, read code, or run queries before Report v1 exists
@@ -167,20 +198,24 @@ specs, prior investigations) must be re-verified against production.
 Make three sequential `mcp__hashharness__create_item` calls:
 
 1. **H0-1 (symptom-claimed anchor):** `item_type=HypothesisEvent`,
-   `links={"prevHyp": <Report v1 text_sha256>}`, `text` describes the symptom claim
+   `links={"prevHyp": <Report v1 record_sha256>}`, `text` describes the symptom claim
    (e.g., `event=symptom-claimed; the symptom is real and worth investigating`).
 
 2. **E1 (verifying evidence):** `item_type=Evidence`,
-   `links={"parentHypEvent": <H0-1 text_sha256>}`, `text` is the actual `direct` observation
+   `links={"parentHypEvent": <H0-1 record_sha256>}`, `text` is the actual `direct` observation
    (production DB result, log line, live API response).
 
-3. **Report v2:** `item_type=Report`, `links={"prevReport": <Report v1 text_sha256>}`,
+3. **Report v2:** `item_type=Report`, `links={"prevReport": <Report v1 record_sha256>}`,
    `text` is the updated narrative now noting that the symptom is verified by E1.
-   Reference E1's `text_sha256` in the prose for human readability.
+   Because `prevReport` declares `chain_predecessor: true`, the value MUST equal the
+   current Report-chain head; if a concurrent writer advanced the head, `create_item`
+   returns `head moved` — call `mcp__hashharness__find_tip(work_package_id, "Report")` and
+   retry. Reference E1's `text_sha256` in the prose for human readability.
 
-The hashharness server returns each item's `text_sha256` in the response. Use that hash
-when forming subsequent links — never invent or synthesize a hash. There is nothing to
-"do not edit" — the storage layer makes Report v1 immutable on creation.
+The hashharness server returns each item's `text_sha256` (storage key) AND `record_sha256`
+(link id) in the response. Use `record_sha256` for every `links` value and never invent or
+synthesize a hash. There is nothing to "do not edit" — the storage layer makes items immutable
+on creation, and `created_at` is server-stamped (callers cannot supply it).
 
 **S0-V.1 — Symptom proximity check.** If the symptom is transport-shaped (DNS failure,
 `gaierror`, connection refused, socket timeout, 5xx, health-check fail, "host not found"),
@@ -355,7 +390,7 @@ breadth (observability), breadth (concurrency). Append M<N>. Go back to Step 2.
 27. Snapshot fields: confirmed live for current-state use (F9)
 28. Formal model exists with solver results, OR `M1: Skipped (user-acknowledged)` with an `Acknowledgement:` field quoting the user's verbatim affirmative reply from a turn AFTER the skip was proposed (PV2)
 29. Schema set, `work-package.md` created, and Report v1 created at Step 0 before any Step 0b/1/4 activity (PW0-init). `mcp__hashharness__get_schema` returns the four type definitions; `mcp__hashharness__get_work_package` returns Report v1 under the chosen `work_package_id`; `./investigations/<slug>/work-package.md` exists on disk pointing at the work package. No items of other types exist yet.
-30. Valid hashharness chain integrity (PW0-live). `mcp__hashharness__verify_chain` from the latest `HypothesisEvent` (or any tip item) returns `ok: true` for every reachable item. The server validates: (a) every item has a valid `text_sha256`/`meta_sha256`/`links_sha256`/`record_sha256`; (b) every link points to an existing item of the declared `target_types`; (c) every `citedEvidence` link's auto-derived `citedEvidenceHash` matches the sha256 of the sorted referenced hashes; (d) Report/Hypothesis/Model chains follow valid type sequences via their respective `prev*` links.
+30. Valid hashharness chain integrity (PW0-live). `mcp__hashharness__verify_chain` from the latest `HypothesisEvent` (or any tip item) returns `ok: true` for every reachable item. The server validates: (a) every item has a valid `text_sha256`/`meta_sha256`/`links_sha256`/`record_sha256`/`schema_sha256`/`schema_binding_sha256`; (b) every link references an existing item via that item's `record_sha256` (linking by `text_sha256` is rejected) and points to an item of the declared `target_types`; (c) every `citedEvidence` link's auto-derived `citedEvidenceHash` matches the sha256 of the sorted referenced `record_sha256`s; (d) Report/Hypothesis/Model chains follow valid type sequences via their respective `prev*` links, AND the Report chain's `prevReport` (declared `chain_predecessor: true`) matches the Report-chain head at write time (CAS-protected against forks).
 31. Transport-shaped symptom: upstream process liveness proven via `direct` evidence before transport investigation (S0-V.1)
 32. Differential evidence: baseline repo/trigger/config match the failing run (F10)
 33. Local/CI investigations: workspace contamination checked via `git status --ignored` (F11)
@@ -380,9 +415,9 @@ for each TC13-18 lifecycle event. PW0-init is defined in Step 0.
 **PW0-live — agent obligations (storage handles the rest).**
 1. Use the right `item_type` + `links`; the server rejects wrong kinds at
    `create_item` time.
-2. Link values are `text_sha256` of items that already exist (returned from a
-   prior `create_item` or fetched via `find_items`/`query_chain`). Never
-   invent a hash.
+2. Link values are `record_sha256` of items that already exist (returned from a
+   prior `create_item` or fetched via `find_items`/`query_chain`/`find_tip`).
+   Never invent a hash. Linking by `text_sha256` is rejected by the server.
 3. `work_package_id` is consistent across all items in one investigation.
 4. At termination, `mcp__hashharness__verify_chain` on the latest tip returns
    `ok: true` for every reachable item.
@@ -413,18 +448,17 @@ remains binding to prevent that.
    `Evidence` item that should no longer be the basis for a decision, possibly
    because a more recent Evidence item supersedes its meaning) is repaired by
    creating a NEW `HypothesisEvent` with `links={"supersedes": <broken-state-
-   change text_sha256>, "prevHyp": <latest H tip>, "citedEvidence": <fresh list>}`.
+   change record_sha256>, "prevHyp": <latest H tip record_sha256>,
+   "citedEvidence": <fresh list of Evidence record_sha256s>}`.
    The old item stays in storage as historical fact (storage immutability
    guarantees this; deletion is not even possible).
 
-   `verify_chain` is currently structural — it doesn't have semantic
-   "supersedes excuses validation gaps" logic the way `check_pw0_live.py`
-   does, because the structural chain stays valid by construction (no
-   `EvidenceHash` to go stale, since `citedEvidenceHash` is auto-derived from
-   the actual current cited items). The only sense in which a state-change
-   "becomes wrong" is semantic, not structural — the agent or user decides
-   the citation is no longer the right basis. The fix is the same: append a
-   `Supersedes` superseder.
+   `verify_chain` checks structural integrity only. The structural chain
+   stays valid by construction: `citedEvidenceHash` is auto-derived from
+   the current cited items, so it cannot drift from them. A state-change
+   only "becomes wrong" semantically — the agent or user decides the
+   citation is no longer the right basis. The fix is to append a
+   `Supersedes` superseder; the old item stays in storage as historical fact.
 
 6. **Cost is not a justification.** Permission prompts, tokens, round-trips
    are costs the user accepts in exchange for integrity. "It's faster to do
@@ -639,8 +673,8 @@ against this same server.
   enforcement on its own. Queries the store via MCP HTTP, reads each
   rejection's structured `attributes`, validates the schema.
 - `scripts/check_workspace_clean.sh [paths...]` — TC33/F11 enforcement.
-  Untouched from filesystem variant; F11 is a filesystem concern in the
-  dev workspace, independent of hashharness.
+  F11 is a filesystem concern in the dev workspace, independent of
+  hashharness.
 
 **PW0-strict (rule 1) is preserved:** each script invocation is exactly one
 `create_item` over the wire — no batching. The fact that the script is
@@ -653,6 +687,4 @@ for ad-hoc queries (e.g., one-off `find_items` to navigate a chain), use
 the `mcp__hashharness__*` tools directly. The wrappers are an
 optimization, not a replacement.
 
-The filesystem variant of formal-debugger ships a different set of helpers
-(`sha256_file.py`, `evidence_hash.py`, `now_iso.py`, etc.). None apply here
-— hashing is internal to hashharness.
+Hashing is internal to hashharness; do not compute hashes locally.
