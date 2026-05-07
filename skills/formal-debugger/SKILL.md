@@ -134,8 +134,34 @@ before writing model code. Append findings to `evidence-log.md`.
 **Locating modeling tooling.** The `formal-modeling` skill ships the Alloy/Dafny runners
 (`alloy_run.sh`, `dafny_run.sh`, `verify.sh`) and reference `.als`/`.dfy` examples. When
 installed as a plugin, look under `~/.claude/plugins/marketplaces/*/skills/formal-modeling/`
+or `~/.claude/plugins/cache/*/formal-methods/*/skills/formal-modeling/`
 (`scripts/` for runners, `references/` for example models). If not found there, check
 `~/.claude/skills/formal-modeling/` or ask the user for the install path before proceeding.
+
+**Alloy availability — DO NOT short-circuit on `which alloy`.** Alloy is **not** expected
+to be on `PATH` as a standalone binary. The skill ships a self-contained runner
+(`alloy_run.sh`) that downloads `alloy.jar` on first use into a sibling `.alloy/` cache and
+executes it via any local Java 17+ install (Homebrew `openjdk`, system OpenJDK, or
+`JAVA_HOME`); it falls back to Docker if no Java 17+ is found. Therefore:
+
+- A bare `which alloy` / `command -v alloy` returning "not found" is **expected** and
+  carries **zero** signal about whether Alloy can run. Never use it as a tool-availability
+  check, and never write reports that say "Alloy is not installed" based on it.
+- Detect Alloy availability **only** by these checks, in order:
+  1. `alloy_run.sh` exists in `<formal-modeling>/scripts/` (locate per the paths above).
+  2. A Java 17+ runtime is reachable (`/opt/homebrew/opt/openjdk/bin/java -version`,
+     `$JAVA_HOME/bin/java -version`, or `java -version` parsed for major version ≥ 17), OR
+     `docker` is on PATH (the runner falls back to a containerised JDK).
+  3. Optional smoke test: `bash <path>/alloy_run.sh <path>/references/<example>.als` on
+     a known-good example completes with a `Solver result:` line.
+- Only if (1) AND (2) both fail may an agent declare Alloy unavailable. In that case the
+  report MUST cite which specific paths and `java`/`docker` lookups were tried — not just
+  "alloy not found".
+- Auto-mode default for tool selection (when the task body does not pin one): prefer
+  **Alloy** for properties expressible as relational/temporal counterexamples (link
+  integrity, lifecycle reachability, permission flows); prefer **Dafny** for
+  data-structure invariants and tight loop-style properties. Do NOT switch from Alloy to
+  Dafny solely because of a failed `which alloy` — that is a bug, not a defaulting rule.
 
 **Default: create a formal model file AND run the solver in the same step.** Use `.dfy` for
 fast iteration, `.als` for counterexamples. Building the model and running the solver are
