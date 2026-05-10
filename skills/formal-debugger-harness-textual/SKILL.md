@@ -202,6 +202,23 @@ Check `investigations/tooling-inventory.md` first (template at `<skill-dir>/temp
 Determine: production DB, logs, metrics, tracing, error tracking, live API, config, queues,
 repo, CI/CD. Write `## Tooling` noting `direct` vs `inferred` per tool.
 
+**S0-Obs — observability-first pre-flight.** Before Step 0b, name the **highest-resolution
+layer where the symptom is directly observable today**. Resolution ladder, highest first:
+production logs of the failing call → production DB row that captured the failure →
+metric/trace covering the failure window → derived report → user description. Append
+`## Observability ceiling` to `tooling-inventory.md` listing:
+
+1. The chosen layer and one-line justification.
+2. The exact query/command that retrieves the symptom from that layer.
+3. **Gap?** If the highest-resolution layer that *should* exist (e.g., HTTP request log
+   capturing `response.model`) is missing, write `Gap: <field/log/metric> not captured`.
+
+If a gap is named, Step 0b's E1 MUST come from the next-best layer AND H0-1 MUST include
+"observability gap may be hiding the real cause." Closing the gap (adding the missing
+log/field) is a valid first hypothesis-driving action — don't defer it to Step 7. The
+investigation does not move past Step 0b on a layer worse than what production already
+supports.
+
 #### Step 0b. Verify the symptom
 
 **S0-V — symptom verification required.** Confirm the symptom with at least one `direct` fact
@@ -298,12 +315,67 @@ Model only the **nearest causal layer**. Build four layers:
 3. **Causal** — execution path to symptom, async/transaction boundaries, branch points
 4. **Observability** — expected traces per hypothesis, source reliability
 
+**Invariant `kind` tagging.** Every row in an invariant table (#6 from the menu) carries a
+`kind` of `protocol | data | observability | setup`. *protocol* invariants govern the
+system under study; *data* invariants govern stored values; *observability* invariants
+govern what should be visible; *setup* invariants bind production-state to replay-state or
+experiment-state. Every `setup` invariant MUST also appear as an A-row in the Step 2
+assumptions audit — `setup` is the strongest place for an unstated premise to hide.
+
+**RE — Replay-environment audit (required when M<N> uses replay or counterfactual evidence).**
+A replay tool is any mechanism that re-runs a production-shaped operation outside production:
+LLM prompt replay, query replay, integration-test replay, recorded-and-replayed HTTP traffic.
+When the model relies on such evidence, append an RE-table to the M<N> entry:
+
+```
+| id  | dimension                            | production value (source) | replay value (source)        | match? |
+|-----|--------------------------------------|---------------------------|------------------------------|--------|
+| RE1 | model / version / endpoint           | (logs / config)           | (replay tool config)         | ✓ / ✗  |
+| RE2 | input parameters (temperature, …)    | (production code path)    | (replay tool defaults)       | ✓ / ✗  |
+| RE3 | identity (user, tenant, flag cohort) | (logs / DB)               | (replay setup)               | ✓ / ✗  |
+| RE4 | data snapshot                        | (production timestamp)    | (replay snapshot timestamp)  | ✓ / ✗  |
+```
+
+Add domain-specific rows as needed (auth scope, region, feature flags, schema version).
+Any `✗` row downgrades the replay's reliability tag to `interpreted` and MUST appear as an
+A-row in the Step 2 assumptions audit.
+
 Append M1 to `model-change-log.md` with trigger, what was created (menu kinds + paths to the
 generated `.md` files under `investigations/<slug>/models/`), and the hand walkthrough.
 
-#### Step 2. Generate hypotheses
+#### Step 2. Audit assumptions, then generate hypotheses
 
-Extract hypotheses from the model. Each **must** follow H1:
+**A1 — Assumptions audit (precedes hypothesis enumeration).** Before writing any
+hypothesis, list the assumptions under which the symptom is *anomalous*. An assumption is
+a premise that, if false, dissolves the entire hypothesis space rather than eliminating
+one branch within it. Typical kinds:
+
+- **Identity:** "Production used component X" (model, service, version, feature-flag cohort).
+- **Input:** "The input value the system saw was V" (request payload, DB row, config snapshot).
+- **Capability:** "Component X is capable of producing the correct output under these inputs."
+- **Routing:** "The request reached the path we think it reached."
+
+Append an `assumptions-audited` HypothesisEvent (chained on the latest Report) before any
+`created` events. Its `text` MUST contain a table:
+
+```
+| id | assumption | falsifier (concrete query/command) | evidence-id | reliability |
+|----|------------|------------------------------------|-------------|-------------|
+| A1 | …          | …                                  | E<N>        | direct/…    |
+```
+
+Every row MUST cite an Evidence record (collect them now if needed; this is a
+Step-4-shaped sub-loop scoped to assumption verification, not hypothesis verification). A
+row without `direct` or `inferred` evidence blocks hypothesis enumeration — the assumption
+itself becomes the next thing to verify.
+
+**A2 — Negation hypothesis.** For each assumption, the hypothesis space MUST include at
+least one hypothesis that is the *negation* of the assumption (e.g., assumption
+"production used model X" → hypothesis "production used a different/lesser model"). These
+are full H1-shaped hypotheses with mechanism and counterfactual; they are not skipped on
+grounds of "obviously true."
+
+Then: extract hypotheses from the model. Each **must** follow H1:
 `[condition] -> [mechanism] -> [state change] -> [symptom]`.
 For each, state the counterfactual (FZ1). Append `created`, `mechanism-stated`,
 `counterfactual-stated` entries to `hypothesis-log.md`.
@@ -423,6 +495,10 @@ breadth (observability), breadth (concurrency). Append M<N>. Go back to Step 2.
 34. No system change preceded `direct` evidence of the changed state (OB1)
 35. Every `rejected` hypothesis has a valid `Reason:` (evidence-based with `Evidence: E<N>`, or preference-based with an allowed `Priority:` + `Rationale:`) in its `status-changed` log entry (U2-doc)
 36. Single-record write discipline observed throughout the investigation (PW0-strict): each item was created by exactly one `mcp__hashharness__create_item` call; no multi-item batch helper was used; pre-write narration was present for each chain record (item type, intended links by hash, intended `text` and `title`).
+37. Observability ceiling named at Step 0a; if a gap is recorded, H0-1 acknowledges it (S0-Obs).
+38. `assumptions-audited` event present with ≥1 row, each row citing an Evidence record with `direct` or `inferred` reliability (A1).
+39. For every assumption row, the hypothesis set contains a negation hypothesis (A2).
+40. Any M<N> citing replay/counterfactual evidence has an RE-table; all `✓` rows are anchored to a `direct` or `inferred` evidence record (RE).
 
 If any fails, iterate. Before acceptance, write an `alternative-considered` and a
 `status-changed` event file under `hypothesis/`. Assemble report: Symptom, Conclusion,
@@ -638,6 +714,12 @@ PrevHash before each Write.
   check that I haven't?"
 - **Observe before reasoning.** Compute exact values (F8), query all tables (F6), trace write
   paths (F7), verify field liveness (F9) — don't reason where you can observe.
+- **Replay-vs-production discrepancy prior.** When a replicated experiment disagrees with a
+  production observation, the first hypothesis to investigate is *"the experiment differs
+  from production in some variable I haven't checked"* — not *"production has a special
+  anomaly the experiment can't capture."* The replay is your apparatus; doubt the apparatus
+  before doubting the system. Concretely: re-walk the RE-table and verify each row with
+  `direct` evidence before proposing a system-level mechanism.
 
 ## Bundled files
 

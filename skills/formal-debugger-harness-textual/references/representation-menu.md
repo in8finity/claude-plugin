@@ -126,10 +126,18 @@ Conversion), 28 (Effect Bag), 38 (Resolved Choice).
 
 Markdown table with columns:
 
-| id | rule | why | trigger | how to verify by hand |
-|----|------|-----|---------|------------------------|
+| id | kind | rule | why | trigger | how to verify by hand |
+|----|------|------|-----|---------|------------------------|
 
 - **id** — stable identifier (e.g. `TC30`, `F6`, `OB1-Late`).
+- **kind** — one of `protocol | data | observability | setup`. *protocol*:
+  invariants of the system under study (state transitions, contracts).
+  *data*: invariants over stored values. *observability*: invariants about
+  what should be visible (logs, metrics, traces). *setup*: invariants
+  binding production-state to replay-state or experiment-state — the
+  anchors for Step-2 assumptions audit rows. Treat any new `setup` row as
+  a candidate A-row; it is the strongest place for an unstated premise to
+  hide.
 - **rule** — one sentence, present tense, falsifiable.
 - **why** — the failure mode the rule prevents.
 - **trigger** — when in the investigation flow this check applies.
