@@ -132,12 +132,16 @@ Markdown table with columns:
 - **id** — stable identifier (e.g. `TC30`, `F6`, `OB1-Late`).
 - **kind** — one of `protocol | data | observability | setup`. *protocol*:
   invariants of the system under study (state transitions, contracts).
-  *data*: invariants over stored values. *observability*: invariants about
+  *data*: invariants over stored values, INCLUDING data-shape converters
+  across version/protocol/component boundaries (a missing converter is a
+  data-layer invariant violation). *observability*: invariants about
   what should be visible (logs, metrics, traces). *setup*: invariants
-  binding production-state to replay-state or experiment-state — the
-  anchors for Step-2 assumptions audit rows. Treat any new `setup` row as
-  a candidate A-row; it is the strongest place for an unstated premise to
-  hide.
+  binding one experimental/operational frame to another — including
+  production-state vs replay-state, experiment vs production, AND
+  multi-version system pairings (V_old peer ↔ V_new peer, legacy ↔
+  current schema, old client ↔ new server). The anchors for Step-2
+  assumptions audit rows. Treat any new `setup` row as a candidate
+  A-row; it is the strongest place for an unstated premise to hide.
 - **rule** — one sentence, present tense, falsifiable.
 - **why** — the failure mode the rule prevents.
 - **trigger** — when in the investigation flow this check applies.

@@ -311,16 +311,25 @@ reply.
 
 Model only the **nearest causal layer**. Build four layers:
 1. **Normative** — business rule invariants, forbidden states, pre/postconditions
-2. **Data** — field constraints, valid/invalid combinations, stale derived data
+2. **Data** — field constraints, valid/invalid combinations, stale derived data, AND
+   **cross-boundary data-shape converters**: whenever the model contains a
+   version/protocol/component asymmetry (V_old ↔ V_new peers, legacy-API ↔ new-API
+   callers, schema-old ↔ schema-new persisted records), enumerate the converter (or
+   its absence) on the read AND write paths. The question to answer: *"what resources
+   change shape across the boundary, and where is the normalization?"* A missing
+   converter on either path is a first-class hypothesis candidate.
 3. **Causal** — execution path to symptom, async/transaction boundaries, branch points
 4. **Observability** — expected traces per hypothesis, source reliability
 
 **Invariant `kind` tagging.** Every row in an invariant table (#6 from the menu) carries a
 `kind` of `protocol | data | observability | setup`. *protocol* invariants govern the
 system under study; *data* invariants govern stored values; *observability* invariants
-govern what should be visible; *setup* invariants bind production-state to replay-state or
-experiment-state. Every `setup` invariant MUST also appear as an A-row in the Step 2
-assumptions audit — `setup` is the strongest place for an unstated premise to hide.
+govern what should be visible; *setup* invariants bind one experimental/operational frame
+to another — including production-state vs replay-state, experiment vs production, AND
+**multi-version system pairings** (e.g., V_old peer ↔ V_new peer in distributed systems,
+legacy ↔ current schema, old client ↔ new server). Every `setup` invariant MUST also
+appear as an A-row in the Step 2 assumptions audit — `setup` is the strongest place for
+an unstated premise to hide.
 
 **RE — Replay-environment audit (required when M<N> uses replay or counterfactual evidence).**
 A replay tool is any mechanism that re-runs a production-shaped operation outside production:

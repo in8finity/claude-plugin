@@ -1168,6 +1168,7 @@ See patterns 32-36 in `references/alloy-patterns.reference` for complete example
 ## Reference files
 
 - `references/alloy-patterns.reference` — Modeling patterns catalog extracted from production use (read when writing a model)
+- `references/vacuous-quantification.reference` — Counterpattern: `all`/`no`/`lone` over a possibly-empty set yields vacuous `assertion holds`. Read when a `check` passes on the first try, especially in temporal models using `TO/prevs`/`TO/nexts`/`TO/last`.
 - `references/static-model-example.als` — Static model: subscription states, invariants, plan upgrade
 - `references/temporal-model-example.als` — Temporal model: subscription lifecycle traces with `var` fields
 - `references/ux-verification-example.als` — UX verification: roles, field access, notifications, CTA validity, gap assertions

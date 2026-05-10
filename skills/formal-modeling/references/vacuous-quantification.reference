@@ -1,0 +1,170 @@
+# Vacuous Quantification — a silent false-pass counterpattern
+
+Alloy's quantifiers follow standard logic: `∀x∈∅. P(x) ≡ true` and `∃x∈∅. P(x) ≡ false`.
+This is correct semantics, but it interacts badly with the workflow
+
+> write predicate → write `check` → solver says `assertion holds` → conclude property is proven
+
+If the predicate quantifies universally over a set that can be **empty in the smallest
+satisfying model**, the predicate is true at that case for trivial reasons and the `check`
+will report `assertion holds` without anything being actually proven.
+
+Read this file when:
+- a `check` returns `assertion holds` on the first try and you didn't expect it to,
+- a predicate uses `all` / `no` / `lone` over a comprehension involving `TO/prevs`,
+  `TO/nexts`, `TO/last`, set difference, or a field that's allowed to be empty,
+- the property you're checking is "eventually X" or "from some point on, never X" in a
+  temporal model.
+
+The Alloy language reference covers the semantics. It does **not** cover this as a
+*modeling* trap. That's the gap this file fills.
+
+---
+
+## Pattern A — `all x: S | P` when `S` can be empty
+
+### The bite
+
+```alloy
+// "there exists t such that for all later times, no bad event"
+pred Converges {
+  some t: T | all later: T - TO/prevs[t] - t | no Trace.bad[later]
+}
+```
+
+At `t = TO/last`, the comprehension `T - TO/prevs[TO/last] - TO/last` is `∅`.
+The inner `all later: ∅ | …` is vacuously true. The outer `some t` is therefore
+satisfied at `t = TO/last` in **every** model — including ones where `Trace.bad` fires
+forever. A `check { not Converges }` will say `assertion holds` and look like a real
+impossibility result.
+
+### Fixes
+
+```alloy
+// (1) Anchor at TO/last. Best when the model has a known finite horizon.
+pred Converges {
+  no Trace.bad[TO/last]
+  and all later: T | TO/lt[TO/last, later] => no Trace.bad[later]
+}
+
+// (2) Exclude the boundary witness. Smallest edit.
+pred Converges {
+  some t: T | t != TO/last
+    and all later: T - TO/prevs[t] - t | no Trace.bad[later]
+}
+
+// (3) Require the post-t set to be non-empty AND clean. Most defensive when
+//     the emptiness of the post-set genuinely matters.
+pred Converges {
+  some t: T |
+    (some later: T - TO/prevs[t] - t | true)
+    and (no later: T - TO/prevs[t] - t | Trace.bad[later])
+}
+```
+
+Pick (1) when the model has a finite horizon and the boundary is meaningful.
+Pick (2) for the smallest edit. Pick (3) when the property is genuinely about a
+non-empty tail.
+
+---
+
+## Pattern B — `lone x: S | P` is true when `|S| = 0`
+
+`lone` means "at most one" — zero satisfies it. Combining `lone` with a set that can be
+empty defines "at most one … or none," which is almost never what the author meant.
+
+```alloy
+// Says "at most one approver, OR no approvers at all." Often unintended.
+fact { lone a: Order.approvers | a.role = Manager }
+
+// If the intent is "exactly one approver of role Manager":
+fact { one a: Order.approvers | a.role = Manager }
+```
+
+---
+
+## Pattern C — `no x: S | P` is true when `S = ∅`
+
+Symmetric to A. `no x: ∅ | P` is vacuously true.
+
+```alloy
+// True for any Foo with empty bar — including the all-empty model.
+pred AllBarsClean { all f: Foo | no b: f.bar | b.broken }
+
+// If the intent is "every Foo has bars AND none of them are broken":
+pred AllBarsClean { all f: Foo | some f.bar and no b: f.bar | b.broken }
+```
+
+---
+
+## Pattern D — Vacuous bound by quantified field
+
+```alloy
+sig Foo { bar: set Bar }
+fact { all f: Foo | all b: f.bar | P[b] }   // SAT for any Foo with empty bar
+```
+
+Easy to miss when the spec allows `bar` to be empty. If `bar` is *required* to be
+non-empty, state that explicitly:
+
+```alloy
+fact { all f: Foo | some f.bar }            // separate non-emptiness fact
+fact { all f: Foo | all b: f.bar | P[b] }
+```
+
+Keeping the two facts separate keeps the intent legible and the failure modes
+distinguishable when a counterexample arrives.
+
+---
+
+## Habit: cross-check before trusting `assertion holds`
+
+When `check` returns `assertion holds`, ask three questions:
+
+**1. Is there a universal quantifier whose domain can be empty in the smallest model?**
+
+Scan the predicate for `all x: S | …`, `no x: S | …`, `lone x: S | …` where `S` is:
+- a set comprehension built with `-`, `&`, `TO/prevs`, `TO/nexts`,
+- a field `f` that the signature declares as `set` (i.e. `lone` or `set`, not `one`),
+- the result of a `let` that can resolve to `∅`.
+
+If yes, suspect vacuity before claiming a real proof.
+
+**2. Run the negation at the boundary case.**
+
+For Pattern A, add a targeted `run` that forces `t` to the boundary and asks for a
+witness. If a witness exists trivially, the predicate is admitting vacuous models:
+
+```alloy
+run BoundaryWitness {
+  some t: T | t = TO/last
+    and all later: T - TO/prevs[t] - t | no Trace.bad[later]
+} for 5
+```
+
+If this is SAT with `Trace.bad` populated arbitrarily, you've reproduced the trap.
+
+**3. Use `expect 1` on the predicate's body to confirm a non-vacuous witness exists.**
+
+```alloy
+run ConvergesNonVacuous {
+  some t: T | (some later: T - TO/prevs[t] - t | true)
+    and Converges
+} for 5 expect 1
+```
+
+If `check` says the property holds **and** this `run` returns UNSAT, the disagreement
+flags the trap: the predicate is being satisfied only by models with an empty witness
+set.
+
+---
+
+## Bottom line
+
+- `∀x∈∅. P(x)` is true. Treat any `all` / `no` / `lone` over a derived set as suspect
+  until you've verified the smallest model can't make that set empty.
+- Don't conflate `lone` with `one`. `lone` admits zero.
+- When a `check` passes on the first try and the property is non-trivial, pair it with
+  a `run … expect 1` against the body to confirm a real witness exists.
+- Boundary cases (`TO/last`, `TO/first`, empty fields) are where vacuity hides. Probe
+  them explicitly.

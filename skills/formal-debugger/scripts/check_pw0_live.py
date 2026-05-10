@@ -58,7 +58,7 @@ EVIDENCE_SINGLE_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}Evidence\*{0,2}\s*:\s*(
 EVIDENCE_HASH_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}EvidenceHash\*{0,2}\s*:\s*([0-9a-fA-F]{64})", re.IGNORECASE)
 SUPERSEDES_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}Supersedes\*{0,2}\s*:\s*(H\d+-\d+)", re.IGNORECASE)
 
-H_FN_RE = re.compile(r"^(H\d+-\d+)_")
+H_FN_RE = re.compile(r"^(A|H\d+-\d+)_")
 E_FN_RE = re.compile(r"^(E\d+)_")
 M_FN_RE = re.compile(r"^(M\d+)_")
 REPORT_FN_RE = re.compile(r"^investigation-report-(\d+)_.*\.md$")
